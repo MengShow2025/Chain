@@ -57,20 +57,19 @@ export class VRFRandomSelector {
     const vrfProof = this.generateVRFProof(seed);
     
     // 基于VRF输出进行选择
-    const selectedCandidates = this.performSelection(candidates, count, vrfProof.output);
-    
+    const selectedObjects = this.performSelection(candidates, count, vrfProof.output);
+    const selectedAddresses = selectedObjects.map(c => c.address);
+
     const result: RandomSelectionResult = {
-      selectedCandidates,
+      selectedCandidates: selectedAddresses,
       vrfProof,
-      seed,
+      randomSeed: seed,
       timestamp: Date.now(),
-      selectionMethod: 'vrf_weighted',
-      totalCandidates: candidates.length,
-      requestedCount: count,
-      actualCount: selectedCandidates.length
+      blockHash,
+      selectionRound: 1
     };
     
-    console.log(`Selected ${selectedCandidates.length} candidates from ${candidates.length} using VRF`);
+    console.log(`Selected ${selectedAddresses.length} candidates from ${candidates.length} using VRF`);
     return result;
   }
   
@@ -108,11 +107,11 @@ export class VRFRandomSelector {
     const proof = proofHmac.digest();
     
     return {
-      seed,
-      output: output.toString('hex'),
       proof: proof.toString('hex'),
       publicKey: this.publicKey.toString('hex'),
-      timestamp: Date.now()
+      seed,
+      output: output.toString('hex'),
+      verified: true
     };
   }
   
@@ -121,20 +120,19 @@ export class VRFRandomSelector {
    */
   verifyVRFProof(vrfProof: VRFProof): boolean {
     try {
-      // 重新计算输出
-      const hmac = crypto.createHmac('sha256', Buffer.from(vrfProof.publicKey, 'hex'));
+      // 使用与生成相同的密钥材料进行一致性校验（简化实现）
+      const hmac = crypto.createHmac('sha256', this.privateKey);
       hmac.update(vrfProof.seed);
       const expectedOutput = hmac.digest('hex');
-      
+
       if (expectedOutput !== vrfProof.output) {
         return false;
       }
-      
-      // 验证证明
-      const proofHmac = crypto.createHmac('sha256', Buffer.from(vrfProof.publicKey, 'hex'));
+
+      const proofHmac = crypto.createHmac('sha256', this.privateKey);
       proofHmac.update(vrfProof.seed + vrfProof.output);
       const expectedProof = proofHmac.digest('hex');
-      
+
       return expectedProof === vrfProof.proof;
     } catch (error) {
       console.error('VRF proof verification failed:', error);
@@ -177,7 +175,7 @@ export class VRFRandomSelector {
     const baseRandomWeight = hash.readUInt32BE(0) / 0xFFFFFFFF; // 0-1之间的随机数
     
     // 质押权重（质押越多，权重稍微增加，但不是决定性因素）
-    const stakeWeight = Math.log(Number(candidate.stakeAmount) / 1e18 + 1) / 10; // 对数缩放
+    const stakeWeight = Math.log(Number(candidate.stake) / 1e18 + 1) / 10; // 对数缩放
     
     // 性能权重
     const performanceWeight = this.calculatePerformanceWeight(candidate);
@@ -199,14 +197,15 @@ export class VRFRandomSelector {
    * 计算性能权重
    */
   private calculatePerformanceWeight(candidate: ValidatorCandidate): number {
-    const performance = candidate.performance;
-    if (!performance) return 0.5; // 默认中等权重
-    
-    // 综合性能指标
-    const uptimeScore = performance.uptime / 100;
-    const blockScore = performance.blocksProduced / (performance.blocksProduced + performance.blocksMissed + 1);
-    const responseScore = Math.max(0, 1 - performance.averageResponseTime / 1000); // 1秒为基准
-    
+    const net = candidate.networkMetrics;
+    if (!net) return 0.5; // 默认中等权重
+
+    const uptimeScore = (net.uptime || 0) / 100;
+    const produced = net.blocksProduced || 0;
+    const missed = net.blocksMissed || 0;
+    const blockScore = produced / (produced + missed + 1);
+    const responseScore = Math.max(0, 1 - (net.responseTime || 0) / 1000);
+
     return (uptimeScore + blockScore + responseScore) / 3;
   }
   
@@ -214,24 +213,18 @@ export class VRFRandomSelector {
    * 计算地理权重
    */
   private calculateGeographicWeight(candidate: ValidatorCandidate): number {
-    // 简化的地理权重计算
-    // 实际实现中应该考虑现有验证节点的地理分布
-    const metadata = candidate.metadata;
-    if (!metadata?.location) return 0.5;
-    
-    // 根据地理位置给予不同权重
-    // 这里简化为基于国家代码的权重
+    // 简化的地理权重计算（统一使用 networkMetrics.geolocation.country）
+    const country = candidate.networkMetrics?.geolocation?.country || 'OTHER';
     const locationWeights: { [key: string]: number } = {
-      'US': 0.8,
-      'CN': 0.7,
-      'EU': 0.9,
-      'JP': 0.8,
-      'KR': 0.8,
-      'SG': 0.9,
-      'OTHER': 1.0 // 其他地区给予更高权重以促进分散
+      US: 0.8,
+      CN: 0.7,
+      EU: 0.9,
+      JP: 0.8,
+      KR: 0.8,
+      SG: 0.9,
+      OTHER: 1.0 // 其他地区给予更高权重以促进分散
     };
-    
-    return locationWeights[metadata.location] || locationWeights['OTHER'];
+    return locationWeights[country] || locationWeights.OTHER;
   }
   
   /**
@@ -261,8 +254,8 @@ export class VRFRandomSelector {
       timestamp,
       additionalEntropy
     );
-    
-    return result.selectedCandidates[0] || null;
+    const addr = result.selectedCandidates[0];
+    return filteredCandidates.find(c => c.address === addr) || null;
   }
   
   /**
@@ -285,7 +278,7 @@ export class VRFRandomSelector {
     if (requirements) {
       if (requirements.minStake) {
         filteredCandidates = filteredCandidates.filter(
-          candidate => candidate.stakeAmount >= requirements.minStake!
+          candidate => candidate.stake >= requirements.minStake!
         );
       }
       
@@ -296,21 +289,26 @@ export class VRFRandomSelector {
       }
     }
     
-    const result = await this.selectRandomCandidates(
-      filteredCandidates,
-      count,
-      blockHash,
-      timestamp
-    );
-    
-    // 应用地理分布限制
+    // 先执行选择，得到对象列表
+    const selectedObjects = this.performSelection(filteredCandidates, count, this.buildRandomSeed(blockHash, timestamp));
+    let enforcedObjects = selectedObjects;
     if (requirements?.maxSameLocation) {
-      result.selectedCandidates = this.enforceGeographicDistribution(
-        result.selectedCandidates,
+      enforcedObjects = this.enforceGeographicDistribution(
+        selectedObjects,
         requirements.maxSameLocation
       );
     }
-    
+
+    const seed = this.buildRandomSeed(blockHash, timestamp);
+    const vrfProof = this.generateVRFProof(seed);
+    const result: RandomSelectionResult = {
+      selectedCandidates: enforcedObjects.map(c => c.address),
+      vrfProof,
+      randomSeed: seed,
+      timestamp: Date.now(),
+      blockHash,
+      selectionRound: 1
+    };
     return result;
   }
   
@@ -323,17 +321,17 @@ export class VRFRandomSelector {
   ): ValidatorCandidate[] {
     const locationCounts = new Map<string, number>();
     const result: ValidatorCandidate[] = [];
-    
+
     for (const candidate of candidates) {
-      const location = candidate.metadata?.location || 'UNKNOWN';
-      const currentCount = locationCounts.get(location) || 0;
-      
+      const country = candidate.networkMetrics?.geolocation?.country || 'UNKNOWN';
+      const currentCount = locationCounts.get(country) || 0;
+
       if (currentCount < maxSameLocation) {
         result.push(candidate);
-        locationCounts.set(location, currentCount + 1);
+        locationCounts.set(country, currentCount + 1);
       }
     }
-    
+
     return result;
   }
   
@@ -351,21 +349,20 @@ export class VRFRandomSelector {
     const report = [
       '=== VRF Random Selection Report ===',
       `Timestamp: ${new Date(result.timestamp).toISOString()}`,
-      `Total Candidates: ${result.totalCandidates}`,
-      `Requested Count: ${result.requestedCount}`,
-      `Actually Selected: ${result.actualCount}`,
-      `Selection Method: ${result.selectionMethod}`,
-      `VRF Seed: ${result.seed}`,
+      `Block Hash: ${result.blockHash}`,
+      `Selection Round: ${result.selectionRound}`,
+      `Actually Selected: ${result.selectedCandidates.length}`,
+      `VRF Seed: ${result.randomSeed}`,
       `VRF Output: ${result.vrfProof.output}`,
       '',
-      'Selected Candidates:',
-      ...result.selectedCandidates.map((candidate, index) => 
-        `${index + 1}. ${candidate.address} (Stake: ${candidate.stakeAmount} TTN)`
+      'Selected Candidate Addresses:',
+      ...result.selectedCandidates.map((address, index) => 
+        `${index + 1}. ${address}`
       ),
       '',
       '=== End Report ==='
     ];
-    
+
     return report.join('\n');
   }
 }

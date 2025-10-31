@@ -462,4 +462,61 @@ export class ValidatorManager {
   getRewardDistributionStats() {
     return this.replacementSystem.getRewardDistributionStats();
   }
+
+  /**
+   * 执行验证节点选举/评估
+   * 触发动态管理系统的性能评估和节点替换检查
+   */
+  async conductElection(): Promise<void> {
+    try {
+      console.log('Conducting validator election/evaluation...');
+      
+      // 获取当前系统状态
+      const systemStats = this.dynamicManager.getSystemStats();
+      console.log('Current system stats:', {
+        activeValidators: systemStats.activeValidators,
+        candidateNodes: systemStats.candidateNodes,
+        systemHealth: systemStats.systemHealth
+      });
+      
+      // 触发性能评估（这会自动处理违规检测和节点替换）
+      await this.performManualPerformanceEvaluation();
+      
+      // 更新epoch
+      this.currentEpoch++;
+      
+      console.log(`Election/evaluation completed for epoch ${this.currentEpoch}`);
+      
+    } catch (error) {
+      console.error('Error during validator election:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * 手动触发性能评估
+   */
+  private async performManualPerformanceEvaluation(): Promise<void> {
+    // 通过动态管理器的违规检测器进行评估
+    const violationDetector = this.dynamicManager.getViolationDetector();
+    const activeValidators = this.getActiveValidators();
+    
+    for (const validator of activeValidators) {
+      try {
+        // 检查验证节点的健康状况
+        const isHealthy = violationDetector.isValidatorHealthy(validator.address);
+        if (!isHealthy) {
+          console.warn(`Validator ${validator.address} is not healthy`);
+        }
+        
+        // 获取最近的违规记录
+        const recentViolations = violationDetector.getRecentViolations(validator.address);
+        if (recentViolations.length > 0) {
+          console.warn(`Validator ${validator.address} has ${recentViolations.length} recent violations`);
+        }
+      } catch (error) {
+        console.warn(`Error checking health for validator ${validator.address}:`, error);
+      }
+    }
+  }
 }

@@ -11,6 +11,8 @@ export class TransactionPool {
   private exchangeBatches: Map<string, ExchangeBatch> = new Map();
   private nonceTracker: Map<string, number> = new Map();
   private gasTracker: Map<string, bigint> = new Map();
+  // 压测模式：通过环境变量启用以绕过反作弊/限流/nonce连续性等，便于压力测试
+  private testingMode: boolean = process.env.TESTING_MODE === 'true';
   
   // 反垃圾邮件保护
   private rateLimiter: Map<string, { count: number; lastReset: number }> = new Map();
@@ -65,13 +67,19 @@ export class TransactionPool {
         this.stats.rejectedTransactions++;
         return false;
       }
-
+      
       // 5. 处理不同类型的交易
+      let added = false;
       if (tx.isZeroGas) {
-        return await this.addZeroGasTransaction(tx);
+        added = await this.addZeroGasTransaction(tx);
       } else {
-        return await this.addRegularTransaction(tx);
+        added = await this.addRegularTransaction(tx);
       }
+      if (!added) {
+        // 类型路由返回失败也应计入拒绝统计
+        this.stats.rejectedTransactions++;
+      }
+      return added;
     } catch (error) {
       console.error('Error adding transaction:', error);
       this.stats.rejectedTransactions++;
@@ -194,7 +202,7 @@ export class TransactionPool {
    */
   private async addRegularTransaction(tx: Transaction): Promise<boolean> {
     // 检查gas价格
-    if (tx.gasPrice < PERFORMANCE_CONFIG.MIN_GAS_PRICE) {
+    if (!this.testingMode && tx.gasPrice < PERFORMANCE_CONFIG.MIN_GAS_PRICE) {
       console.error(`Gas price ${tx.gasPrice} below minimum ${PERFORMANCE_CONFIG.MIN_GAS_PRICE}`);
       return false;
     }
@@ -223,32 +231,56 @@ export class TransactionPool {
    * 验证交易基本信息
    */
   private validateTransaction(tx: Transaction): boolean {
+    console.log('Validating transaction:', tx.hash);
+    
     // 检查必需字段
     if (!tx.hash || !tx.from || !tx.to) {
+      console.error('Transaction validation failed: missing required fields', {
+        hash: !!tx.hash,
+        from: !!tx.from,
+        to: !!tx.to
+      });
       return false;
     }
     
     // 检查地址格式
     if (!this.isValidAddress(tx.from) || !this.isValidAddress(tx.to)) {
+      console.error('Transaction validation failed: invalid address format', {
+        from: tx.from,
+        to: tx.to,
+        fromValid: this.isValidAddress(tx.from),
+        toValid: this.isValidAddress(tx.to)
+      });
       return false;
     }
     
-    // 检查gas限制
-    if (tx.gas <= 0 || tx.gas > PERFORMANCE_CONFIG.MAX_GAS_LIMIT) {
+    // 检查gas限制（BigInt 比较）
+    if (tx.gas <= 0n || tx.gas > PERFORMANCE_CONFIG.MAX_GAS_LIMIT) {
+      console.error('Transaction validation failed: invalid gas', {
+        gas: tx.gas,
+        maxGasLimit: PERFORMANCE_CONFIG.MAX_GAS_LIMIT
+      });
       return false;
     }
     
-    // 检查值
-    if (tx.value < 0) {
+    // 检查值（BigInt 比较）
+    if (tx.value < 0n) {
+      console.error('Transaction validation failed: negative value', { value: tx.value });
       return false;
     }
     
     // 检查时间戳
     const now = Date.now();
     if (tx.timestamp > now + 60000 || tx.timestamp < now - 300000) { // 允许1分钟未来，5分钟过去
+      console.error('Transaction validation failed: invalid timestamp', {
+        timestamp: tx.timestamp,
+        now: now,
+        diff: tx.timestamp - now
+      });
       return false;
     }
     
+    console.log('Transaction validation passed:', tx.hash);
     return true;
   }
   
@@ -285,6 +317,8 @@ export class TransactionPool {
    * 验证nonce
    */
   private validateNonce(tx: Transaction): boolean {
+    // 测试模式下跳过nonce连续性校验，允许并发乱序
+    if (this.testingMode) return true;
     const expectedNonce = this.nonceTracker.get(tx.from) || 0;
     
     // nonce必须连续
@@ -463,30 +497,41 @@ export class TransactionPool {
    * 反垃圾邮件保护
    */
   private antiSpamProtection(tx: Transaction): boolean {
+    console.log('Running anti-spam protection for transaction:', tx.hash);
+    // 测试模式直接通过反垃圾检测
+    if (this.testingMode) {
+      return true;
+    }
+    
     // 1. 检查交易是否已存在
     if (this.pendingTransactions.has(tx.hash) || this.zeroGasTransactions.has(tx.hash)) {
-      console.warn(`Transaction ${tx.hash} already exists in pool`);
+      console.error('Anti-spam failed: duplicate transaction', { hash: tx.hash });
       return false;
     }
 
     // 2. 检查nonce
     if (!this.validateNonce(tx)) {
-      console.error(`Invalid nonce for transaction ${tx.hash}`);
+      console.error('Anti-spam failed: invalid nonce', { 
+        from: tx.from, 
+        nonce: tx.nonce,
+        expected: this.nonceTracker.get(tx.from) || 0
+      });
       return false;
     }
 
     // 3. 检查可疑模式
     if (this.detectSuspiciousPattern(tx)) {
-      console.warn(`Suspicious pattern detected for transaction ${tx.hash}`);
+      console.error('Anti-spam failed: suspicious pattern detected', { from: tx.from });
       return false;
     }
 
     // 4. 检查交易频率
     if (this.isHighFrequencySpam(tx.from)) {
-      console.warn(`High frequency spam detected from ${tx.from}`);
+      console.error('Anti-spam failed: high frequency spam detected', { from: tx.from });
       return false;
     }
 
+    console.log('Anti-spam protection passed for transaction:', tx.hash);
     return true;
   }
 
@@ -494,6 +539,8 @@ export class TransactionPool {
    * 速率限制检查
    */
   private checkRateLimit(address: string): boolean {
+    // 测试模式禁用速率限制
+    if (this.testingMode) return true;
     const now = Date.now();
     const limit = this.rateLimiter.get(address);
     
@@ -523,6 +570,8 @@ export class TransactionPool {
    * 检测可疑模式
    */
   private detectSuspiciousPattern(tx: Transaction): boolean {
+    // 测试模式禁用可疑模式检测
+    if (this.testingMode) return false;
     const pattern = `${tx.from}-${tx.to}-${tx.value}`;
     const count = this.suspiciousPatterns.get(pattern) || 0;
     

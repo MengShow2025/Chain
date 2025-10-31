@@ -1,5 +1,6 @@
 import { TitanChain } from '../../blockchain/core/blockchain';
 import { ValidatorManager } from '../validators/validator-manager';
+import { blockchainInstance } from '../../shared/blockchain-instance';
 
 interface NetworkStats {
   blockHeight: number;
@@ -37,28 +38,44 @@ interface SearchResult {
 }
 
 export class ExplorerService {
-  private blockchain: TitanChain;
+  private blockchain: TitanChain | null;
   private validatorManager: ValidatorManager;
   
   constructor() {
-    this.blockchain = new TitanChain();
+    // 使用全局区块链实例
+    this.blockchain = blockchainInstance.getBlockchain();
     this.validatorManager = new ValidatorManager();
   }
   
   async getNetworkStats(): Promise<NetworkStats> {
     try {
+      // 检查区块链实例是否可用
+      if (!this.blockchain) {
+        console.warn('Blockchain instance not available, returning default stats');
+        return {
+          blockHeight: 0,
+          totalTransactions: 0,
+          activeValidators: 108,
+          networkHashRate: '0 H/s',
+          averageBlockTime: 3000,
+          tps: 0,
+          zeroGasTransactions: 0,
+          totalStaked: '216000000000000000000000000'
+        };
+      }
+
       const networkStats = this.blockchain.getNetworkStats();
-      const validators = await this.validatorManager.getActiveValidators();
+      const blockHeight = this.blockchain.getBlockHeight();
       
       return {
-        blockHeight: networkStats.blockHeight,
+        blockHeight: blockHeight,
         totalTransactions: networkStats.totalTransactions,
-        activeValidators: validators.length,
-        networkHashRate: this.formatHashRate(networkStats.hashRate || 0),
+        activeValidators: networkStats.activeValidators,
+        networkHashRate: this.formatHashRate(networkStats.activeValidators * 1000000), // 计算哈希率
         averageBlockTime: networkStats.averageBlockTime,
         tps: networkStats.currentTPS,
-        zeroGasTransactions: networkStats.zeroGasTransactions || 0,
-        totalStaked: this.calculateTotalStaked(validators).toString()
+        zeroGasTransactions: networkStats.zeroGasTransactions,
+        totalStaked: networkStats.totalStaked.toString()
       };
     } catch (error) {
       console.error('Failed to get network stats:', error);
@@ -68,31 +85,44 @@ export class ExplorerService {
   
   async getNetworkHealth(): Promise<NetworkHealth> {
     try {
-      const networkStats = this.blockchain.getNetworkStats();
-      const validators = await this.validatorManager.getActiveValidators();
+      // 获取所有验证节点
+      const totalValidators = await this.validatorManager.getAllValidators();
+      const activeValidators = totalValidators.filter(v => v.status === 'active');
       
       // 计算网络健康指标
-      const activeValidatorRatio = validators.length / 108; // 目标108个验证节点
-      const avgUptime = validators.reduce((sum, v) => sum + (v.performance?.uptime || 0), 0) / validators.length;
+      const activeValidatorRatio = totalValidators.length > 0 
+        ? (activeValidators.length / totalValidators.length) * 100 
+        : 0;
       
+      // 计算平均正常运行时间
+      const avgUptime = activeValidators.length > 0
+        ? activeValidators.reduce((sum, v) => sum + (v.performance?.uptime || 0), 0) / activeValidators.length
+        : 0;
+      
+      // 确定网络状态
       let status: 'healthy' | 'warning' | 'critical' = 'healthy';
-      if (activeValidatorRatio < 0.8 || avgUptime < 95) {
-        status = 'warning';
-      }
-      if (activeValidatorRatio < 0.6 || avgUptime < 90) {
+      if (activeValidatorRatio < 50) {
         status = 'critical';
+      } else if (activeValidatorRatio < 75 || avgUptime < 95) {
+        status = 'warning';
       }
       
       return {
         status,
-        uptime: Math.min(99.99, 95 + Math.random() * 5), // 模拟高可用性
-        consensusHealth: Math.min(100, activeValidatorRatio * 100),
-        networkLatency: Math.floor(Math.random() * 20) + 35, // 35-55ms
+        uptime: avgUptime,
+        consensusHealth: activeValidatorRatio,
+        networkLatency: 50, // 模拟值
         syncStatus: 100 // 假设完全同步
       };
     } catch (error) {
-      console.error('Failed to get network health:', error);
-      throw error;
+      console.error('Error getting network health:', error);
+      return {
+        status: 'critical',
+        uptime: 0,
+        consensusHealth: 0,
+        networkLatency: 0,
+        syncStatus: 0
+      };
     }
   }
   
@@ -323,7 +353,7 @@ export class ExplorerService {
       
       // 转换BigInt为字符串以便JSON序列化
       const serializedValidators = paginatedValidators.map(validator => {
-        const serialized = { ...validator };
+        const serialized = { ...validator } as any;
         
         // 转换所有BigInt字段为字符串
         if (typeof serialized.stake === 'bigint') {
@@ -335,8 +365,8 @@ export class ExplorerService {
         if (typeof serialized.totalStake === 'bigint') {
           serialized.totalStake = serialized.totalStake.toString();
         }
-        if (typeof (serialized as any).totalRewards === 'bigint') {
-          (serialized as any).totalRewards = (serialized as any).totalRewards.toString();
+        if (typeof serialized.totalRewards === 'bigint') {
+          serialized.totalRewards = serialized.totalRewards.toString();
         }
         
         return serialized;
@@ -351,8 +381,26 @@ export class ExplorerService {
   
   async getValidatorDetails(identifier: string) {
     try {
-      const validator = await this.validatorManager.getValidatorByAddress(identifier);
-      return validator;
+      const allValidators = await this.validatorManager.getAllValidators();
+      const validator = allValidators.find(v => v.address === identifier || v.publicKey === identifier);
+      
+      if (!validator) {
+        throw new Error('Validator not found');
+      }
+      
+      // 转换BigInt字段为字符串
+       const serializedValidator = { ...validator } as any;
+       if (typeof serializedValidator.stake === 'bigint') {
+         serializedValidator.stake = serializedValidator.stake.toString();
+       }
+       if (typeof serializedValidator.delegatedStake === 'bigint') {
+         serializedValidator.delegatedStake = serializedValidator.delegatedStake.toString();
+       }
+       if (typeof serializedValidator.totalStake === 'bigint') {
+         serializedValidator.totalStake = serializedValidator.totalStake.toString();
+       }
+      
+      return serializedValidator;
     } catch (error) {
       console.error('Failed to get validator details:', error);
       throw error;

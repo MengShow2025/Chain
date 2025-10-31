@@ -24,7 +24,7 @@ export class CandidateManager {
     PROBATION: 'probation',
     SUSPENDED: 'suspended',
     BLACKLISTED: 'blacklisted'
-  };
+  } as const;
   
   constructor() {
     console.log('Initializing Candidate Manager');
@@ -96,13 +96,20 @@ export class CandidateManager {
         address: candidateData.address,
         publicKey: candidateData.publicKey,
         stake: candidateData.stake,
+        delegatedStake: BigInt(0),
+        totalStake: candidateData.stake,
         commission: candidateData.commission,
         registeredAt: Date.now(),
         lastElectionAttempt: 0,
         electionAttempts: 0,
         isEligible: true,
         status: this.CANDIDATE_STATUS.PENDING,
-        metadata: candidateData.metadata || {}
+        metadata: candidateData.metadata ?? {
+          name: `Candidate ${candidateData.address.slice(0, 8)}`,
+          description: 'TitanChain Validator Candidate'
+        },
+        readinessScore: 75,
+        violationHistory: []
       };
       
       this.candidates.set(candidateData.address, candidate);
@@ -237,7 +244,10 @@ export class CandidateManager {
       }
       
       // 记录移除原因
-      candidate.metadata = candidate.metadata || {};
+      candidate.metadata = candidate.metadata ?? {
+        name: `Candidate ${candidate.address.slice(0, 8)}`,
+        description: 'TitanChain Validator Candidate'
+      };
       candidate.metadata.removalReason = reason;
       candidate.metadata.removedAt = Date.now();
       
@@ -534,7 +544,10 @@ export class CandidateManager {
     
     // 更新候选节点的选举优先级
     candidateList.forEach((item, index) => {
-      item.candidate.metadata = item.candidate.metadata || {};
+      item.candidate.metadata = item.candidate.metadata ?? {
+        name: `Candidate ${item.address.slice(0, 8)}`,
+        description: 'TitanChain Validator Candidate'
+      };
       item.candidate.metadata.ranking = index + 1;
     });
   }

@@ -10,7 +10,10 @@
     "preview": "vite preview",
     "check": "tsc --noEmit",
     "server:dev": "nodemon",
-    "dev": "concurrently \"npm run client:dev\" \"npm run server:dev\""
+    "blockchain:start": "tsx blockchain/start-node.ts",
+    "blockchain:dev": "nodemon --exec tsx blockchain/start-node.ts --watch blockchain --ext ts",
+    "dev": "concurrently \"npm run client:dev\" \"npm run server:dev\"",
+    "dev:full": "concurrently \"npm run client:dev\" \"npm run server:dev\" \"npm run blockchain:dev\""
   },
   "dependencies": {
     "@tanstack/react-query": "^5.59.16",

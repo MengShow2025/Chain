@@ -4,6 +4,7 @@
 
 import { ValidatorManager } from './validator-manager.js';
 import { VALIDATOR_STATUS } from '../../shared/constants/blockchain.js';
+import { Validator, ValidatorCandidate } from '../../shared/types/blockchain.js';
 
 /**
  * 测试动态验证节点管理系统
@@ -14,33 +15,87 @@ async function testDynamicValidatorSystem() {
   try {
     // 初始化验证节点管理器
     const validatorManager = new ValidatorManager();
-    await validatorManager.initialize();
+    const genesisValidators: Validator[] = [
+      {
+        address: '0x0000000000000000000000000000000000000001',
+        publicKey: 'genesis-pk-1',
+        stake: 1000n,
+        delegatedStake: 0n,
+        totalStake: 1000n,
+        commission: 5,
+        status: VALIDATOR_STATUS.ACTIVE,
+        performance: {
+          blocksProduced: 0,
+          blocksExpected: 0,
+          uptime: 100,
+          missedBlocks: 0,
+          slashingEvents: 0,
+          averageBlockTime: 3000,
+          score: 100,
+        },
+        metadata: {
+          name: 'Genesis Validator 1',
+          description: 'Bootstrap genesis validator',
+        },
+        joinedAt: Date.now(),
+        lastActiveBlock: 0,
+      },
+    ];
+
+    await validatorManager.initialize(genesisValidators);
 
     console.log('✅ 验证节点管理器初始化完成\n');
 
     // 测试1: 注册候选节点
     console.log('📝 测试1: 注册候选节点');
-    const candidates = [
+    const candidates: ValidatorCandidate[] = [
       {
-        address: 'candidate1',
-        publicKey: 'pubkey1',
-        stake: 1000,
-        commission: 0.1,
-        metadata: { name: '候选节点1', description: '测试候选节点1' }
+        address: '0x00000000000000000000000000000000000000c1',
+        publicKey: 'p'.repeat(64),
+        stake: 1000n,
+        delegatedStake: 0n,
+        totalStake: 1000n,
+        commission: 10,
+        registeredAt: Date.now(),
+        lastElectionAttempt: 0,
+        electionAttempts: 0,
+        isEligible: true,
+        status: 'pending' as 'pending',
+        metadata: { name: '候选节点1', description: '测试候选节点1' },
+        readinessScore: 80,
+        violationHistory: [],
       },
       {
-        address: 'candidate2', 
-        publicKey: 'pubkey2',
-        stake: 1500,
-        commission: 0.08,
-        metadata: { name: '候选节点2', description: '测试候选节点2' }
+        address: '0x00000000000000000000000000000000000000c2', 
+        publicKey: 'q'.repeat(64),
+        stake: 1500n,
+        delegatedStake: 0n,
+        totalStake: 1500n,
+        commission: 8,
+        registeredAt: Date.now(),
+        lastElectionAttempt: 0,
+        electionAttempts: 0,
+        isEligible: true,
+        status: 'pending' as 'pending',
+        metadata: { name: '候选节点2', description: '测试候选节点2' },
+        readinessScore: 85,
+        violationHistory: [],
       },
       {
-        address: 'candidate3',
-        publicKey: 'pubkey3', 
-        stake: 2000,
-        commission: 0.12,
-        metadata: { name: '候选节点3', description: '测试候选节点3' }
+        address: '0x00000000000000000000000000000000000000c3',
+        publicKey: 'r'.repeat(64), 
+        stake: 2000n,
+        delegatedStake: 0n,
+        totalStake: 2000n,
+        commission: 12,
+        registeredAt: Date.now(),
+        lastElectionAttempt: 0,
+        electionAttempts: 0,
+        isEligible: true,
+        status: 'pending' as 'pending',
+        metadata: { name: '候选节点3', description: '测试候选节点3' },
+        readinessScore: 82,
+        violationHistory: [],
       }
     ];
 

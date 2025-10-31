@@ -16,7 +16,10 @@ export const CONSENSUS_CONFIG = {
   MAX_VALIDATORS: 108, // 最大验证节点数
   MAX_CANDIDATES: 2000, // 最大候补节点数
   EPOCH_BLOCKS: 21600, // 每个epoch的区块数 (约6小时)
+  EPOCH_LENGTH: 21600, // 每个epoch的长度
   BLOCK_TIME: 3, // 目标出块时间(秒)
+  ELECTION_INTERVAL: 3600, // 验证者选举间隔(秒) - 1小时
+  REWARD_RATE: 0.05, // 奖励率 5%
   MIN_VALIDATOR_STAKE: BigInt('1000000000000000000000'), // 最小验证节点质押 (1000 TTN)
   MIN_DELEGATOR_STAKE: BigInt('100000000000000000000'), // 最小委托质押 (100 TTN)
   UNBONDING_PERIOD: 604800, // 解绑期 (7天)
@@ -64,9 +67,9 @@ export const TOKEN_CONFIG = {
 export const ZERO_GAS_CONFIG = {
   EXCHANGE_BATCH_FREE: true, // 交易所批量交易免费
   CONTRACT_TIER_FEES: {
-    1: BigInt('100000000000000'), // 一级合约费用 (0.0001 TTN)
-    2: BigInt('500000000000000'), // 二级合约费用 (0.0005 TTN)
-    3: BigInt('1000000000000000'), // 三级合约费用 (0.001 TTN)
+    1: { fee: BigInt('100000000000000'), maxGas: BigInt('300000'), dailyLimit: 100 },
+    2: { fee: BigInt('500000000000000'), maxGas: BigInt('600000'), dailyLimit: 50 },
+    3: { fee: BigInt('1000000000000000'), maxGas: BigInt('1200000'), dailyLimit: 20 },
   },
   PLATFORM_FEE_RATIO: 0.2, // 平台收费比例 20%
   PUBLISHER_FEE_RATIO: 0.8, // 发布者收费比例 80%
@@ -74,6 +77,13 @@ export const ZERO_GAS_CONFIG = {
   // 批量交易配置
   BATCH_SIZE_THRESHOLD: 100, // 批量交易最小数量
   BATCH_VOLUME_THRESHOLD: BigInt('1000000000000000000'), // 批量交易最小总量 (1 TTN)
+  // 兼容 zero-gas-engine 的字段命名
+  MAX_BATCH_SIZE: 100,
+  MAX_BATCH_VOLUME: BigInt('1000000000000000000'),
+  // 每日交易量限额（用于批量免气费）
+  DAILY_VOLUME_LIMIT: BigInt('10000000000000000000'), // 10 TTN
+  // 免气费白名单交易所地址
+  AUTHORIZED_EXCHANGES: [] as string[],
 } as const;
 
 // 流动性共享配置
@@ -154,4 +164,12 @@ export const EVENT_TYPES = {
   VALIDATOR_LEFT: 'validator_left',
   STAKING_REWARD: 'staking_reward',
   LIQUIDITY_UPDATED: 'liquidity_updated',
+} as const;
+
+// 兼容旧代码的命名导出
+export const EXCHANGE_BATCH_FREE = ZERO_GAS_CONFIG.EXCHANGE_BATCH_FREE;
+export const CONTRACT_TIER_FEES = {
+  TIER_1: ZERO_GAS_CONFIG.CONTRACT_TIER_FEES[1].fee,
+  TIER_2: ZERO_GAS_CONFIG.CONTRACT_TIER_FEES[2].fee,
+  TIER_3: ZERO_GAS_CONFIG.CONTRACT_TIER_FEES[3].fee,
 } as const;

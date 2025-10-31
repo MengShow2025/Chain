@@ -7,6 +7,7 @@ import { TransactionPool } from './transaction-pool.js';
 import { BlockValidator } from './block-validator.js';
 import { ZeroGasEngine } from './zero-gas-engine.js';
 import { HighPerformanceProcessor } from './high-performance-processor.js';
+import { calculateBlockReward } from '../../shared/utils/rewards.ts';
 
 /**
  * TitanChain主链核心
@@ -28,13 +29,18 @@ export class TitanChain {
   
   // 网络统计
   private networkStats: NetworkStats = {
-    totalBlocks: 0,
+    currentTPS: 0,
+    averageTPS: 0,
+    peakTPS: 0,
+    blockHeight: 0,
     totalTransactions: 0,
-    totalValidators: 0,
-    networkHashRate: BigInt(0),
+    activeValidators: 0,
+    candidateNodes: 0,
+    totalStaked: BigInt(0),
+    networkHealth: 'excellent',
     averageBlockTime: CONSENSUS_CONFIG.BLOCK_TIME * 1000,
-    tps: 0,
-    lastBlockTime: Date.now()
+    zeroGasTransactions: 0,
+    exchangeBatchTransactions: 0
   };
   
   constructor() {
@@ -61,13 +67,18 @@ export class TitanChain {
       // 初始化各个组件
       await this.consensusEngine.initialize(genesisValidators);
       await this.validatorManager.initialize(genesisValidators);
-      await this.evmEngine.initialize();
+      // EVMExecutor不需要初始化，构造函数已经设置了默认状态
       
       // 创建创世区块
       await this.createGenesisBlock();
       
-      // 启动区块生产
-      this.startBlockProduction();
+      // 启动区块生产（可通过环境变量禁用）
+      const enableProduction = (process.env.ENABLE_BLOCK_PRODUCTION ?? 'true').toLowerCase() !== 'false';
+      if (enableProduction) {
+        this.startBlockProduction();
+      } else {
+        console.log('Block production disabled by ENV ENABLE_BLOCK_PRODUCTION=false');
+      }
       
       // 启动验证节点选举
       this.startValidatorElection();
@@ -105,7 +116,7 @@ export class TitanChain {
       number: 0,
       hash: '0x0000000000000000000000000000000000000000000000000000000000000000',
       parentHash: '0x0000000000000000000000000000000000000000000000000000000000000000',
-      timestamp: Date.now(),
+      timestamp: Number(process.env.GENESIS_TIMESTAMP ?? 0),
       validator: '0x0000000000000000000000000000000000000000',
       transactions: [],
       transactionsRoot: '0x0000000000000000000000000000000000000000000000000000000000000000',
@@ -114,13 +125,14 @@ export class TitanChain {
       gasUsed: BigInt(0),
       gasLimit: PERFORMANCE_CONFIG.MAX_GAS_LIMIT,
       difficulty: BigInt(1),
+      nonce: '0x0000000000000000',
       size: 1024,
-      extraData: 'TitanChain Genesis Block'
+      reward: BigInt(0)
     };
     
     this.blockchain.push(genesisBlock);
     this.currentBlock = genesisBlock;
-    this.networkStats.totalBlocks = 1;
+    this.networkStats.blockHeight = 0;
     
     console.log('Genesis block created');
   }
@@ -174,13 +186,21 @@ export class TitanChain {
       }
       
       const nextBlockNumber = this.currentBlock.number + 1;
+      console.log(`Attempting to produce block #${nextBlockNumber}`);
+      
+      // 获取活跃验证者
+      const activeValidators = this.validatorManager.getActiveValidators();
+      console.log(`Active validators count: ${activeValidators.length}`);
       
       // 选择区块生产者
       const producer = this.consensusEngine.selectBlockProducer(nextBlockNumber);
       if (!producer) {
         console.error('No block producer selected');
+        console.log('Available validators:', activeValidators.map(v => v.address));
         return null;
       }
+      
+      console.log(`Block producer selected: ${producer}`);
       
       // 获取待打包交易
       const transactions = this.transactionPool.getTransactionsForBlock(
@@ -188,11 +208,30 @@ export class TitanChain {
         PERFORMANCE_CONFIG.MAX_TRANSACTIONS_PER_BLOCK
       );
       
+      console.log(`Transactions to include: ${transactions.length}`);
+      
       // 执行交易
-      const executionResults = await this.evmEngine.executeTransactions(transactions);
+      const executionResults = [];
+      
+      // 预计算区块哈希并更新EVM执行器的区块上下文
+      const precomputedBlockHash = this.calculateBlockHash(
+        nextBlockNumber,
+        this.currentBlock.hash,
+        producer,
+        transactions
+      );
+      this.evmEngine.updateState(nextBlockNumber, precomputedBlockHash, Date.now());
+      
+      for (const tx of transactions) {
+        const result = await this.evmEngine.executeTransaction(tx);
+        executionResults.push(result);
+      }
       
       // 计算gas使用量
       const gasUsed = executionResults.reduce((sum, result) => sum + result.gasUsed, BigInt(0));
+
+      // 计算本块奖励（4年减半，首个周期约4亿枚，总产出上限10亿枚）
+      const blockReward = calculateBlockReward(nextBlockNumber);
       
       // 创建新区块
       const newBlock: Block = {
@@ -204,13 +243,17 @@ export class TitanChain {
         transactions,
         transactionsRoot: this.calculateTransactionsRoot(transactions),
         receiptsRoot: this.calculateReceiptsRoot(executionResults),
-        stateRoot: await this.evmEngine.getStateRoot(),
+        // 使用EVM执行器提供的stateRoot，而不是直接读取EVMState内部字段
+        stateRoot: this.evmEngine.getStateRoot(),
         gasUsed,
         gasLimit: PERFORMANCE_CONFIG.MAX_GAS_LIMIT,
         difficulty: BigInt(1),
         size: this.calculateBlockSize(transactions),
-        extraData: `Block produced by ${producer}`
+        nonce: `0x${nextBlockNumber.toString(16).padStart(16, '0')}`,
+        reward: blockReward
       };
+      
+      console.log(`Created block #${newBlock.number} with hash: ${newBlock.hash}`);
       
       // 验证区块
       if (!await this.blockValidator.validateBlock(newBlock, this.currentBlock)) {
@@ -218,15 +261,22 @@ export class TitanChain {
         return null;
       }
       
+      console.log(`Block #${newBlock.number} validation passed`);
+      
       // 处理区块
       if (!await this.consensusEngine.processNewBlock(newBlock)) {
         console.error('Block processing failed');
         return null;
       }
       
+      console.log(`Block #${newBlock.number} processing completed`);
+      
       // 添加到区块链
       this.blockchain.push(newBlock);
       this.currentBlock = newBlock;
+
+      // 分发本块奖励到验证者（PoS 共识层）
+      await this.consensusEngine.distributeBlockRewards(nextBlockNumber, blockReward);
       
       // 从交易池中移除已打包交易
       this.transactionPool.removeTransactions(transactions.map(tx => tx.hash));
@@ -234,7 +284,7 @@ export class TitanChain {
       // 更新网络统计
       this.updateNetworkStats(newBlock);
       
-      console.log(`Block #${newBlock.number} produced by ${producer} with ${transactions.length} transactions`);
+      console.log(`✅ Block #${newBlock.number} produced by ${producer} with ${transactions.length} transactions`);
       return newBlock;
       
     } catch (error) {
@@ -278,7 +328,65 @@ export class TitanChain {
       return false;
     }
   }
-  
+
+  /**
+   * 接收并验证来自网络的区块（P2P）
+   */
+  async receiveBlock(block: Block): Promise<boolean> {
+    try {
+      const parent = this.currentBlock;
+      // 只接受比当前高度新的区块
+      if (parent && block.number <= parent.number) {
+        // 检测同一高度双签（同一验证者在同一高度提交不同区块）
+        if (block.number === parent.number && block.validator === parent.validator && block.hash !== parent.hash) {
+          console.warn(`⚠️ Detected potential double-sign at height #${block.number} by ${block.validator}`);
+          try {
+            await this.consensusEngine.slashValidator(block.validator, 'double_sign', {
+              height: block.number,
+              currentHash: parent.hash,
+              incomingHash: block.hash
+            });
+          } catch (e) {
+            console.error('Error slashing validator for double-sign:', e);
+          }
+        } else {
+          console.warn(`Received stale block #${block.number}, current is #${parent.number}`);
+        }
+        return false;
+      }
+
+      // 验证区块
+      const valid = await this.blockValidator.validateBlock(block, parent || undefined);
+      if (!valid) {
+        console.error('Received block validation failed');
+        return false;
+      }
+
+      // 处理区块（共识层）
+      const processed = await this.consensusEngine.processNewBlock(block);
+      if (!processed) {
+        console.error('Received block processing failed');
+        return false;
+      }
+
+      // 添加到链并更新状态
+      this.blockchain.push(block);
+      this.currentBlock = block;
+
+      // 从交易池移除已打包交易
+      this.transactionPool.removeTransactions(block.transactions.map(tx => tx.hash));
+
+      // 更新网络统计
+      this.updateNetworkStats(block);
+
+      console.log(`📦 Imported block #${block.number} from network with ${block.transactions.length} txs`);
+      return true;
+    } catch (error) {
+      console.error('Error receiving block:', error);
+      return false;
+    }
+  }
+
   /**
    * 获取区块
    */
@@ -324,28 +432,78 @@ export class TitanChain {
    * 获取验证节点排名
    */
   getValidatorRankings() {
-    return this.validatorManager.getValidatorRankings();
+    // 本地计算排名：按综合评分和总质押排序
+    const validators = this.validatorManager.getActiveValidators?.()
+      ? this.validatorManager.getActiveValidators()
+      : [];
+    const rankings = validators
+      .map(v => ({
+        address: v.address,
+        name: v.metadata?.name || v.address,
+        stake: v.stake,
+        totalStake: v.totalStake,
+        score: v.performance?.score ?? 0,
+      }))
+      .sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        // 次级排序依据：总质押
+        return Number(b.totalStake - a.totalStake);
+      })
+      .map((item, idx) => ({ ...item, ranking: idx + 1 }));
+    return rankings;
   }
   
   /**
    * 获取候补节点排名
    */
   getCandidateRankings() {
-    return this.validatorManager.getCandidateRankings();
+    // 本地计算候选节点排名：按总质押和准备度评分排序
+    const candidates = this.validatorManager.getCandidateValidators?.()
+      ? this.validatorManager.getCandidateValidators()
+      : [];
+    const rankings = candidates
+      .map(c => ({
+        address: c.address,
+        name: c.metadata?.name || c.address,
+        stake: c.stake,
+        totalStake: c.totalStake,
+        readinessScore: c.readinessScore ?? 0,
+      }))
+      .sort((a, b) => {
+        // 先按总质押排序，再按准备度评分
+        const stakeDiff = Number(b.totalStake - a.totalStake);
+        if (stakeDiff !== 0) return stakeDiff;
+        return (b.readinessScore || 0) - (a.readinessScore || 0);
+      })
+      .map((item, idx) => ({ ...item, ranking: idx + 1 }));
+    return rankings;
   }
   
   /**
    * 获取选举统计
    */
   getElectionStats() {
-    return this.validatorManager.getElectionStats();
+    // 使用动态管理器的系统统计作为选举统计
+    if (this.validatorManager.getDynamicManagerStatus) {
+      return this.validatorManager.getDynamicManagerStatus();
+    }
+    // 兜底：返回验证节点统计
+    return this.getValidatorStats();
   }
   
   /**
    * 获取候补节点管理统计
    */
   getCandidateManagerStats() {
-    return this.validatorManager.getCandidateManagerStats();
+    // 使用候选替换系统状态作为候补管理统计
+    if (this.validatorManager.getReplacementSystemStatus) {
+      return this.validatorManager.getReplacementSystemStatus();
+    }
+    // 兜底：返回候选节点数量
+    const candidates = this.validatorManager.getCandidateValidators?.()
+      ? this.validatorManager.getCandidateValidators()
+      : [];
+    return { candidateNodes: candidates.length } as any;
   }
   
   /**
@@ -359,7 +517,13 @@ export class TitanChain {
    * 强制进行验证节点选举
    */
   async forceValidatorElection(): Promise<boolean> {
-    return await this.validatorManager.forceElection();
+    try {
+      await this.validatorManager.conductElection();
+      return true;
+    } catch (e) {
+      console.error('Force validator election failed:', e);
+      return false;
+    }
   }
   
   /**
@@ -449,25 +613,36 @@ export class TitanChain {
    * 更新网络统计
    */
   private updateNetworkStats(block: Block): void {
-    this.networkStats.totalBlocks++;
+    this.networkStats.blockHeight = this.blockchain.length - 1;
     this.networkStats.totalTransactions += block.transactions.length;
-    this.networkStats.totalValidators = this.validatorManager.getValidatorStats().activeValidators;
-    this.networkStats.networkHashRate = BigInt(this.networkStats.totalValidators * 1000000);
+    this.networkStats.activeValidators = this.validatorManager.getValidatorStats().activeValidators;
     
-    // 计算平均出块时间
-    if (this.networkStats.totalBlocks > 1) {
-      const timeDiff = block.timestamp - this.networkStats.lastBlockTime;
-      this.networkStats.averageBlockTime = 
-        (this.networkStats.averageBlockTime * (this.networkStats.totalBlocks - 1) + timeDiff) / 
-        this.networkStats.totalBlocks;
-    }
+    // 计算零gas费交易数量
+    const zeroGasCount = block.transactions.filter(tx => tx.isZeroGas).length;
+    this.networkStats.zeroGasTransactions += zeroGasCount;
     
-    // 计算TPS
+    // 计算交易所批量交易数量
+    const exchangeBatchCount = block.transactions.filter(tx => tx.exchangeBatch).length;
+    this.networkStats.exchangeBatchTransactions += exchangeBatchCount;
+    
+    // 计算当前TPS
     if (this.networkStats.averageBlockTime > 0) {
-      this.networkStats.tps = (block.transactions.length * 1000) / this.networkStats.averageBlockTime;
+      this.networkStats.currentTPS = (block.transactions.length * 1000) / this.networkStats.averageBlockTime;
+      
+      // 更新平均TPS
+      const totalBlocks = this.blockchain.length;
+      if (totalBlocks > 1) {
+        this.networkStats.averageTPS = 
+          (this.networkStats.averageTPS * (totalBlocks - 1) + this.networkStats.currentTPS) / totalBlocks;
+      } else {
+        this.networkStats.averageTPS = this.networkStats.currentTPS;
+      }
+      
+      // 更新峰值TPS
+      if (this.networkStats.currentTPS > this.networkStats.peakTPS) {
+        this.networkStats.peakTPS = this.networkStats.currentTPS;
+      }
     }
-    
-    this.networkStats.lastBlockTime = block.timestamp;
   }
   
   /**

@@ -22,7 +22,10 @@ export class PoSConsensus {
       nextValidators: [],
       proposer: '',
       round: 0,
-      step: 'propose'
+      step: 'propose',
+      totalStaked: BigInt(0),
+      lastBlockTime: Date.now(),
+      networkHashRate: BigInt(0)
     };
     
     this.blockValidator = new BlockValidator();
@@ -284,22 +287,23 @@ export class PoSConsensus {
     if (!validator) return;
     
     // 更新区块生产统计
-    validator.blocksProduced = (validator.blocksProduced || 0) + 1;
-    validator.lastBlockTime = block.timestamp;
+    validator.lastActiveBlock = block.number;
     
     // 更新性能统计
     if (!validator.performance) {
       validator.performance = {
-        uptime: 100,
         blocksProduced: 0,
+        blocksExpected: 0,
+        uptime: 100,
         missedBlocks: 0,
+        slashingEvents: 0,
         averageBlockTime: CONSENSUS_CONFIG.BLOCK_TIME * 1000,
-        lastActive: Date.now()
+        score: 100
       };
     }
     
     validator.performance.blocksProduced++;
-    validator.performance.lastActive = Date.now();
+    validator.lastActiveBlock = block.number;
     
     // 计算平均出块时间
     if (validator.performance.blocksProduced > 1) {
@@ -315,7 +319,7 @@ export class PoSConsensus {
   private updateConsensusState(): void {
     const activeValidators = this.getActiveValidators();
     
-    this.consensusState.activeValidators = activeValidators.length;
+    this.consensusState.activeValidators = activeValidators;
     this.consensusState.totalStaked = activeValidators.reduce((sum, v) => sum + v.stake, BigInt(0));
     this.consensusState.lastBlockTime = Date.now();
     
@@ -398,9 +402,6 @@ export class PoSConsensus {
       if (validator.performance && validator.performance.uptime > 90) {
         finalReward = (finalReward * BigInt(110)) / BigInt(100); // 10%加成
       }
-      
-      // 更新验证节点奖励
-      validator.totalRewards = (validator.totalRewards || BigInt(0)) + finalReward;
       
       console.log(`Distributed ${finalReward} TTN to validator ${validator.address}`);
     }

@@ -15,6 +15,7 @@ export interface Block {
   difficulty: bigint;
   nonce: string;
   size: number;
+  reward: bigint;
 }
 
 export interface Transaction {
@@ -43,7 +44,7 @@ export interface ExchangeBatch {
   totalVolume: bigint;
   timestamp: number;
   transactions: string[]; // 交易哈希列表
-  status: 'pending' | 'processing' | 'completed' | 'failed';
+  status: 'pending' | 'processing' | 'completed' | 'failed' | 'ready' | 'processed';
   createdAt: number;
 }
 
@@ -77,6 +78,11 @@ export interface ValidatorMetadata {
   website?: string;
   identity?: string;
   details?: string;
+  // 候选/验证节点在本地计算的排名（可选）
+  ranking?: number;
+  // 维护信息（可选）：移除原因与时间
+  removalReason?: string;
+  removedAt?: number;
 }
 
 export interface CandidateNode {
@@ -126,6 +132,9 @@ export interface ConsensusState {
   proposer: string;
   round: number;
   step: 'propose' | 'prevote' | 'precommit' | 'commit';
+  totalStaked: bigint;
+  lastBlockTime: number;
+  networkHashRate: bigint;
 }
 
 export interface EVMState {

@@ -91,3 +91,4 @@ keystore/
 *.key
 *.pem
 wallet.dat
+genesis-wallets.json

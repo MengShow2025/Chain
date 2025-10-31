@@ -106,9 +106,9 @@ export const useWalletStore = create<WalletState>()(
             throw new Error('Failed to get provider');
           }
           
-          // 优化：一次性获取所有必要信息，减少API调用次数
-          const [accounts, chainId, balance] = await Promise.all([
-            provider.request({ method: 'eth_accounts' }),
+          // 先获取账户以供余额查询使用，避免变量使用顺序错误
+          const accounts: string[] = await provider.request({ method: 'eth_accounts' });
+          const [chainId, balance] = await Promise.all([
             provider.request({ method: 'eth_chainId' }),
             provider.request({
               method: 'eth_getBalance',

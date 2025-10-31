@@ -7,20 +7,17 @@ import { ZERO_GAS_CONFIG, ERROR_CODES } from '../../shared/constants/blockchain.
  */
 export class EVMExecutor {
   private state: EVMState;
-  private accounts: Map<string, Account> = new Map();
-  private contracts: Map<string, Contract> = new Map();
-  private logs: Log[] = [];
+  private blockNumber: number = 0;
+  private blockHash: string = '0x0000000000000000000000000000000000000000000000000000000000000000';
+  private gasUsed: bigint = BigInt(0);
+  private gasLimit: bigint = BigInt(30000000);
   
   constructor() {
     this.state = {
-      blockNumber: 0,
-      blockHash: '0x0000000000000000000000000000000000000000000000000000000000000000',
-      timestamp: Date.now(),
-      gasLimit: BigInt(30000000),
-      gasUsed: BigInt(0),
-      baseFee: BigInt(0),
-      difficulty: BigInt(1),
-      coinbase: '0x0000000000000000000000000000000000000000'
+      accounts: new Map(),
+      contracts: new Map(),
+      storage: new Map(),
+      logs: []
     };
   }
   
@@ -73,7 +70,7 @@ export class EVMExecutor {
       }
       
       // 4. 更新状态
-      this.state.gasUsed += result.gasUsed;
+      this.gasUsed += result.gasUsed;
       
       // 5. 返回执行结果
       return {
@@ -113,7 +110,7 @@ export class EVMExecutor {
     }
     
     // 检查gas限制
-    if (tx.gas > this.state.gasLimit) {
+    if (tx.gas > this.gasLimit) {
       return { success: false, error: 'Gas limit exceeded' };
     }
     
@@ -132,8 +129,9 @@ export class EVMExecutor {
       
       if (tx.contractTier) {
         // 智能合约分层收费
-        const tierFee = ZERO_GAS_CONFIG.CONTRACT_TIER_FEES[tx.contractTier as keyof typeof ZERO_GAS_CONFIG.CONTRACT_TIER_FEES];
-        return tierFee || BigInt(0);
+        const tierConf = ZERO_GAS_CONFIG.CONTRACT_TIER_FEES[tx.contractTier as keyof typeof ZERO_GAS_CONFIG.CONTRACT_TIER_FEES];
+        const tierFee = tierConf?.fee ?? BigInt(0);
+        return tierFee;
       }
     }
     
@@ -183,15 +181,14 @@ export class EVMExecutor {
         address: contractAddress,
         creator: tx.from,
         code: tx.data,
-        abi: [], // 实际应用中需要解析ABI
-        storage: new Map(),
+        storage: new Map<string, string>(),
         createdAt: Date.now(),
-        version: '1.0.0'
+        tier: tx.contractTier ?? 0
       };
       
       // 保存合约
-      this.accounts.set(contractAddress, contractAccount);
-      this.contracts.set(contractAddress, contract);
+      this.state.accounts.set(contractAddress, contractAccount);
+      this.state.contracts.set(contractAddress, contract);
       
       // 从部署者账户转移资金
       const deployerAccount = await this.getAccount(tx.from);
@@ -206,14 +203,13 @@ export class EVMExecutor {
         address: contractAddress,
         topics: ['0x' + 'ContractDeployed'.padEnd(64, '0')],
         data: tx.data,
-        blockNumber: this.state.blockNumber,
+        blockNumber: this.blockNumber,
         transactionHash: tx.hash,
         transactionIndex: 0,
-        blockHash: this.state.blockHash,
-        logIndex: this.logs.length
+        logIndex: this.state.logs.length
       };
       
-      this.logs.push(log);
+      this.state.logs.push(log);
       
       console.log(`Contract deployed at ${contractAddress}`);
       
@@ -245,7 +241,7 @@ export class EVMExecutor {
     error?: string;
   }> {
     try {
-      const contract = this.contracts.get(tx.to!);
+      const contract = this.state.contracts.get(tx.to!);
       if (!contract) {
         return {
           success: false,
@@ -302,35 +298,32 @@ export class EVMExecutor {
         return await this.executeApprove(contract, tx);
         
       default:
-        // 通用合约执行
-        gasUsed = BigInt(50000); // 默认gas消耗
+        // 默认处理：简单的状态更新
+        gasUsed = BigInt(50000);
         
-        // 生成执行日志
         const log: Log = {
           address: contract.address,
-          topics: [methodSignature],
+          topics: ['0x' + methodSignature.substring(2).padEnd(64, '0')],
           data: tx.data,
-          blockNumber: this.state.blockNumber,
+          blockNumber: this.blockNumber,
           transactionHash: tx.hash,
           transactionIndex: 0,
-          blockHash: this.state.blockHash,
-          logIndex: this.logs.length
+          logIndex: this.state.logs.length
         };
         
-        logs.push(log);
-        this.logs.push(log);
+        this.state.logs.push(log);
         
         return {
           success: true,
           gasUsed,
-          logs,
+          logs: [log],
           returnData: '0x0000000000000000000000000000000000000000000000000000000000000001'
         };
     }
   }
   
   /**
-   * 执行ERC20 transfer
+   * 执行转账操作
    */
   private async executeTransfer(contract: Contract, tx: Transaction): Promise<{
     success: boolean;
@@ -340,12 +333,14 @@ export class EVMExecutor {
     error?: string;
   }> {
     try {
-      // 解析参数
-      const to = '0x' + tx.data.substring(34, 74);
+      // 解析参数：to地址和金额
+      const toAddress = '0x' + tx.data.substring(34, 74);
       const amount = BigInt('0x' + tx.data.substring(74, 138));
       
       // 检查余额
-      const fromBalance = contract.storage.get(tx.from) || BigInt(0);
+      const fromBalanceRaw = contract.storage.get(`balance_${tx.from}`);
+      const fromBalance = fromBalanceRaw ? BigInt(fromBalanceRaw) : BigInt(0);
+      
       if (fromBalance < amount) {
         return {
           success: false,
@@ -355,27 +350,27 @@ export class EVMExecutor {
       }
       
       // 执行转账
-      contract.storage.set(tx.from, fromBalance - amount);
-      const toBalance = contract.storage.get(to) || BigInt(0);
-      contract.storage.set(to, toBalance + amount);
+      contract.storage.set(`balance_${tx.from}`, (fromBalance - amount).toString());
+      const toBalanceRaw = contract.storage.get(`balance_${toAddress}`);
+      const toBalance = toBalanceRaw ? BigInt(toBalanceRaw) : BigInt(0);
+      contract.storage.set(`balance_${toAddress}`, (toBalance + amount).toString());
       
-      // 生成Transfer事件
+      // 生成Transfer事件日志
       const log: Log = {
         address: contract.address,
         topics: [
           '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef', // Transfer事件签名
           '0x' + tx.from.substring(2).padStart(64, '0'),
-          '0x' + to.substring(2).padStart(64, '0')
+          '0x' + toAddress.substring(2).padStart(64, '0')
         ],
         data: '0x' + amount.toString(16).padStart(64, '0'),
-        blockNumber: this.state.blockNumber,
+        blockNumber: this.blockNumber,
         transactionHash: tx.hash,
         transactionIndex: 0,
-        blockHash: this.state.blockHash,
-        logIndex: this.logs.length
+        logIndex: this.state.logs.length
       };
       
-      this.logs.push(log);
+      this.state.logs.push(log);
       
       return {
         success: true,
@@ -388,13 +383,13 @@ export class EVMExecutor {
       return {
         success: false,
         gasUsed: BigInt(21000),
-        error: 'Transfer execution failed'
+        error: error instanceof Error ? error.message : 'Transfer failed'
       };
     }
   }
   
   /**
-   * 执行ERC20 balanceOf
+   * 执行余额查询
    */
   private async executeBalanceOf(contract: Contract, tx: Transaction): Promise<{
     success: boolean;
@@ -404,30 +399,32 @@ export class EVMExecutor {
     error?: string;
   }> {
     try {
-      // 解析地址参数
-      const address = '0x' + tx.data.substring(34, 74);
+      // 解析参数：查询地址
+      const queryAddress = '0x' + tx.data.substring(34, 74);
       
       // 获取余额
-      const balance = contract.storage.get(address) || BigInt(0);
+      const balanceRaw = contract.storage.get(`balance_${queryAddress}`);
+      const balance = balanceRaw ? BigInt(balanceRaw) : BigInt(0);
+      const balanceHex = '0x' + balance.toString(16).padStart(64, '0');
       
       return {
         success: true,
         gasUsed: BigInt(2300),
         logs: [],
-        returnData: '0x' + balance.toString(16).padStart(64, '0')
+        returnData: balanceHex
       };
       
     } catch (error) {
       return {
         success: false,
         gasUsed: BigInt(2300),
-        error: 'BalanceOf execution failed'
+        error: error instanceof Error ? error.message : 'Balance query failed'
       };
     }
   }
   
   /**
-   * 执行ERC20 approve
+   * 执行授权操作
    */
   private async executeApprove(contract: Contract, tx: Transaction): Promise<{
     success: boolean;
@@ -437,31 +434,29 @@ export class EVMExecutor {
     error?: string;
   }> {
     try {
-      // 解析参数
-      const spender = '0x' + tx.data.substring(34, 74);
+      // 解析参数：被授权地址和金额
+      const spenderAddress = '0x' + tx.data.substring(34, 74);
       const amount = BigInt('0x' + tx.data.substring(74, 138));
       
       // 设置授权
-      const approvalKey = `${tx.from}_${spender}`;
-      contract.storage.set(approvalKey, amount);
+      contract.storage.set(`allowance_${tx.from}_${spenderAddress}`, amount.toString());
       
-      // 生成Approval事件
+      // 生成Approval事件日志
       const log: Log = {
         address: contract.address,
         topics: [
           '0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925', // Approval事件签名
           '0x' + tx.from.substring(2).padStart(64, '0'),
-          '0x' + spender.substring(2).padStart(64, '0')
+          '0x' + spenderAddress.substring(2).padStart(64, '0')
         ],
         data: '0x' + amount.toString(16).padStart(64, '0'),
-        blockNumber: this.state.blockNumber,
+        blockNumber: this.blockNumber,
         transactionHash: tx.hash,
         transactionIndex: 0,
-        blockHash: this.state.blockHash,
-        logIndex: this.logs.length
+        logIndex: this.state.logs.length
       };
       
-      this.logs.push(log);
+      this.state.logs.push(log);
       
       return {
         success: true,
@@ -474,7 +469,7 @@ export class EVMExecutor {
       return {
         success: false,
         gasUsed: BigInt(21000),
-        error: 'Approve execution failed'
+        error: error instanceof Error ? error.message : 'Approval failed'
       };
     }
   }
@@ -490,7 +485,6 @@ export class EVMExecutor {
     error?: string;
   }> {
     try {
-      // 获取发送方和接收方账户
       const fromAccount = await this.getAccount(tx.from);
       const toAccount = await this.getAccount(tx.to!);
       
@@ -499,7 +493,7 @@ export class EVMExecutor {
         return {
           success: false,
           gasUsed: BigInt(21000),
-          error: 'Insufficient balance'
+          error: 'Insufficient balance for transfer'
         };
       }
       
@@ -508,17 +502,21 @@ export class EVMExecutor {
       fromAccount.nonce++;
       toAccount.balance += tx.value;
       
+      console.log(`Transferred ${tx.value} from ${tx.from} to ${tx.to}`);
+      
       return {
         success: true,
         gasUsed: BigInt(21000),
-        logs: []
+        logs: [],
+        returnData: '0x'
       };
       
     } catch (error) {
+      console.error('Transfer error:', error);
       return {
         success: false,
         gasUsed: BigInt(21000),
-        error: 'Transfer failed'
+        error: error instanceof Error ? error.message : 'Transfer failed'
       };
     }
   }
@@ -527,7 +525,7 @@ export class EVMExecutor {
    * 获取账户信息
    */
   private async getAccount(address: string): Promise<Account> {
-    let account = this.accounts.get(address);
+    let account = this.state.accounts.get(address);
     
     if (!account) {
       // 创建新账户
@@ -539,7 +537,7 @@ export class EVMExecutor {
         storageRoot: '0x0000000000000000000000000000000000000000000000000000000000000000'
       };
       
-      this.accounts.set(address, account);
+      this.state.accounts.set(address, account);
     }
     
     return account;
@@ -549,71 +547,84 @@ export class EVMExecutor {
    * 检查是否为合约地址
    */
   private isContract(address: string): boolean {
-    return this.contracts.has(address);
+    return this.state.contracts.has(address);
   }
   
   /**
    * 计算合约地址
    */
   private calculateContractAddress(creator: string, nonce: number): string {
-    // 简化实现：使用创建者地址和nonce生成合约地址
-    const hash = Buffer.from(`${creator}${nonce}`).toString('hex');
-    return '0x' + hash.substring(0, 40);
+    // 简化的合约地址计算
+    const hash = creator + nonce.toString();
+    return '0x' + hash.substring(2, 42).padStart(40, '0');
   }
   
   /**
    * 计算代码哈希
    */
   private calculateCodeHash(code: string): string {
-    // 简化实现
-    return '0x' + Buffer.from(code).toString('hex').substring(0, 64).padStart(64, '0');
+    // 简化的代码哈希计算
+    return '0x' + code.substring(2, 66).padStart(64, '0');
   }
   
   /**
-   * 更新EVM状态
+   * 更新状态
    */
   updateState(blockNumber: number, blockHash: string, timestamp: number): void {
-    this.state.blockNumber = blockNumber;
-    this.state.blockHash = blockHash;
-    this.state.timestamp = timestamp;
-    this.state.gasUsed = BigInt(0);
+    this.blockNumber = blockNumber;
+    this.blockHash = blockHash;
+  }
+
+  /**
+   * 获取状态根（简化实现：使用当前blockHash作为stateRoot）
+   */
+  getStateRoot(): string {
+    return this.blockHash;
   }
   
   /**
-   * 获取EVM状态
+   * 获取状态
    */
   getState(): EVMState {
-    return { ...this.state };
+    return {
+      accounts: new Map(this.state.accounts),
+      contracts: new Map(this.state.contracts),
+      storage: new Map(this.state.storage),
+      logs: [...this.state.logs]
+    };
   }
   
   /**
-   * 获取合约信息
+   * 获取合约
    */
   getContract(address: string): Contract | undefined {
-    return this.contracts.get(address);
+    return this.state.contracts.get(address);
   }
   
   /**
-   * 获取所有日志
+   * 获取日志
    */
   getLogs(): Log[] {
-    return [...this.logs];
+    return [...this.state.logs];
   }
   
   /**
-   * 清理日志
+   * 清除日志
    */
   clearLogs(): void {
-    this.logs = [];
+    this.state.logs = [];
   }
   
   /**
    * 重置状态
    */
   reset(): void {
-    this.accounts.clear();
-    this.contracts.clear();
-    this.logs = [];
-    this.state.gasUsed = BigInt(0);
+    this.state = {
+      accounts: new Map(),
+      contracts: new Map(),
+      storage: new Map(),
+      logs: []
+    };
+    this.gasUsed = BigInt(0);
   }
 }

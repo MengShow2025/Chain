@@ -58,7 +58,7 @@ brew install git curl wget
 
 ```bash
 # 克隆TitanChain仓库
-git clone https://github.com/your-org/TitanChain.git
+git clone https://github.com/MengShow2025/Chain.git
 cd TitanChain
 
 # 安装依赖
@@ -443,7 +443,7 @@ install_titanchain() {
     echo "⬇️ Downloading TitanChain..."
     
     cd /opt/titanchain
-    sudo -u titanchain git clone https://github.com/your-org/TitanChain.git .
+    sudo -u titanchain git clone https://github.com/yMengShow2025/Chain.git .
     
     echo "📦 Installing TitanChain dependencies..."
     sudo -u titanchain pnpm install
@@ -735,6 +735,82 @@ EOF
 # 运行验证者注册
 node scripts/register-validator.js
 ```
+
+### 2.5 P2P网络部署与反作弊配置
+
+本章节介绍如何在多节点环境下启动TitanChain的P2P网络，并配置基础反作弊机制与区块生产策略。
+
+#### 环境变量说明
+
+在启动节点前，根据角色设置以下环境变量：
+
+- `P2P_PORT`: P2P监听端口，默认 `4001`
+- `P2P_HOST`: P2P监听地址，默认 `0.0.0.0`
+- `BOOTNODES`: 引导节点列表，逗号分隔，格式为 `ws://host:port`
+- `NODE_ID`: 当前节点唯一标识（字符串即可），用于日志和限流计数
+- `ENABLE_BLOCK_PRODUCTION`: 是否在本地节点产块。默认开启，设置为 `false` 可仅作为跟随节点
+
+> 说明：P2P参数由 `network/p2p-node.ts` 读取；区块生产开关由 `blockchain/core/blockchain.ts` 的 `start()` 方法读取。
+
+#### 启动示例
+
+1) 引导节点（产块）
+
+```bash
+# 在终端1启动引导节点（产块）
+NODE_ID=bootnode-1 \
+P2P_PORT=4001 \
+P2P_HOST=0.0.0.0 \
+ENABLE_BLOCK_PRODUCTION=true \
+npm run blockchain:start
+```
+
+2) 跟随节点（不产块，仅接收）
+
+```bash
+# 在终端2启动跟随节点（不产块）
+NODE_ID=node-2 \
+P2P_PORT=4002 \
+P2P_HOST=0.0.0.0 \
+BOOTNODES=ws://127.0.0.1:4001 \
+ENABLE_BLOCK_PRODUCTION=false \
+npm run blockchain:start
+```
+
+多个跟随节点时，`BOOTNODES` 可包含多个引导节点，使用逗号分隔，例如：
+
+```bash
+BOOTNODES=ws://192.168.1.10:4001,ws://192.168.1.11:4001
+```
+
+#### 反作弊机制概览
+
+系统已实现以下基础反作弊策略：
+
+- 生产者权限校验：在 `PoSConsensus.processNewBlock()` 中严格校验区块生产者是否为当前高度应当的生产者。
+- 双签检测与惩罚：在 `TitanChain.receiveBlock()` 中检测同一高度的不同区块，并触发 `slashValidator()` 对双签者进行惩罚（根据 `CONSENSUS_CONFIG` 的 `SLASH_FRACTION_DOUBLE_SIGN`）。
+- P2P消息限流：在 `network/p2p-node.ts` 中对区块与交易消息做基础限流，防止洪泛攻击与刷包。
+
+默认限流参数（可在 `network/p2p-node.ts` 中调整）：
+
+- `RATE_LIMIT_WINDOW_MS = 3000`（窗口3秒）
+- `MAX_BLOCKS_PER_WINDOW = 5`（每窗口最多5个区块消息）
+- `MAX_TX_PER_WINDOW = 200`（每窗口最多200笔交易消息）
+
+#### 自检与调试
+
+- 检查P2P连接：启动后查看日志应出现 `Connected to bootnode` 或 `Peer connected` 等提示。
+- 验证不产块节点：`ENABLE_BLOCK_PRODUCTION=false` 的节点日志中不会打印 `Block production started`。
+- 模拟双签：在同一高度向网络注入不同区块，观察日志是否出现 `Detected double-sign` 且触发 `slashValidator`。
+- 洪泛保护验证：使用脚本快速发送大量区块/交易消息，观察日志中的 `Rate limit exceeded` 提示。
+
+#### 安全建议
+
+- 始终为产块节点设置稳定的 `NODE_ID`，便于审计与追踪。
+- 引导节点应部署在受控网络环境，并限制公开暴露的端口。
+- 如需更严格的黑名单、最低质押校验等，可在 `blockchain/core/block-validator.ts` 与 `consensus/validator-manager.ts` 中扩展实际逻辑并开启名单同步。
+
+> 未来增强方向：增加节点信誉评分、时间戳漂移策略、分叉与重组处理、生产者角色控制等。
 
 ### 2.6 节点运维和故障排除
 

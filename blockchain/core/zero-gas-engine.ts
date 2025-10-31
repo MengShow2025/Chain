@@ -1,4 +1,4 @@
-import { Transaction, ExchangeBatch, ContractCall } from '../../shared/types/blockchain.js';
+import { Transaction, ExchangeBatch } from '../../shared/types/blockchain.js';
 import { ZERO_GAS_CONFIG, PERFORMANCE_CONFIG } from '../../shared/constants/blockchain.js';
 
 /**
@@ -99,7 +99,9 @@ export class ZeroGasEngine {
         batchId,
         exchangeId,
         transactions: [],
+        totalTransactions: 0,
         totalVolume: BigInt(0),
+        timestamp: Date.now(),
         createdAt: Date.now(),
         status: 'pending'
       };
@@ -123,7 +125,8 @@ export class ZeroGasEngine {
     }
     
     // 添加交易到批量
-    batch.transactions.push(tx);
+    batch.transactions.push(tx.hash);
+    batch.totalTransactions += 1;
     batch.totalVolume = newTotalVolume;
     
     // 更新每日使用量

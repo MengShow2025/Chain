@@ -1,5 +1,5 @@
 import { Transaction } from '../../shared/types/blockchain.js';
-import { CONTRACT_TIER_FEES, EXCHANGE_BATCH_FREE, ERROR_CODES } from '../../shared/constants/blockchain.js';
+import { CONTRACT_TIER_FEES, ZERO_GAS_CONFIG, ERROR_CODES } from '../../shared/constants/blockchain.js';
 
 /**
  * 0-gas费管理器
@@ -111,7 +111,7 @@ export class ZeroGasManager {
     
     // 检查批量交易的最小数量
     const batchSize = this.getBatchSize(tx);
-    if (batchSize < EXCHANGE_BATCH_FREE.MIN_BATCH_SIZE) {
+    if (batchSize < ZERO_GAS_CONFIG.BATCH_SIZE_THRESHOLD) {
       return false;
     }
     

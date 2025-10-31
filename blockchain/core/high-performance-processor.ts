@@ -14,6 +14,18 @@ export class HighPerformanceProcessor {
   private batchProcessor: BatchProcessor;
   private parallelWorkers: Worker[] = [];
   private isProcessing = false;
+  // 运行时可调配置，避免修改只读常量
+  private runtimeConfig: {
+    maxBatchSize: number;
+    maxQueueSize: number;
+    emergencyThreshold: number;
+    normalThreshold: number;
+  } = {
+    maxBatchSize: PERFORMANCE_CONFIG.MAX_BATCH_SIZE,
+    maxQueueSize: PERFORMANCE_CONFIG.MAX_QUEUE_SIZE,
+    emergencyThreshold: PERFORMANCE_CONFIG.EMERGENCY_THRESHOLD,
+    normalThreshold: PERFORMANCE_CONFIG.NORMAL_THRESHOLD,
+  };
   
   // 性能监控
   private metrics = {
@@ -382,9 +394,9 @@ export class HighPerformanceProcessor {
   getQueueStatus() {
     return {
       size: this.processingQueue.length,
-      capacity: PERFORMANCE_CONFIG.MAX_QUEUE_SIZE || 10000,
-      utilizationPercent: (this.processingQueue.length / (PERFORMANCE_CONFIG.MAX_QUEUE_SIZE || 10000)) * 100,
-      isEmergency: this.processingQueue.length > PERFORMANCE_CONFIG.EMERGENCY_THRESHOLD,
+      capacity: this.runtimeConfig.maxQueueSize || 10000,
+      utilizationPercent: (this.processingQueue.length / (this.runtimeConfig.maxQueueSize || 10000)) * 100,
+      isEmergency: this.processingQueue.length > this.runtimeConfig.emergencyThreshold,
       estimatedProcessingTime: this.estimateProcessingTime()
     };
   }
@@ -407,14 +419,14 @@ export class HighPerformanceProcessor {
     const metrics = this.getMetrics();
     
     // 根据队列大小调整批处理大小
-    if (metrics.queueSize > PERFORMANCE_CONFIG.EMERGENCY_THRESHOLD) {
-      PERFORMANCE_CONFIG.MAX_BATCH_SIZE = Math.min(
-        PERFORMANCE_CONFIG.MAX_BATCH_SIZE * 1.5,
+    if (metrics.queueSize > this.runtimeConfig.emergencyThreshold) {
+      this.runtimeConfig.maxBatchSize = Math.min(
+        Math.floor(this.runtimeConfig.maxBatchSize * 1.5),
         2000
       );
-    } else if (metrics.queueSize < PERFORMANCE_CONFIG.NORMAL_THRESHOLD) {
-      PERFORMANCE_CONFIG.MAX_BATCH_SIZE = Math.max(
-        PERFORMANCE_CONFIG.MAX_BATCH_SIZE * 0.8,
+    } else if (metrics.queueSize < this.runtimeConfig.normalThreshold) {
+      this.runtimeConfig.maxBatchSize = Math.max(
+        Math.floor(this.runtimeConfig.maxBatchSize * 0.8),
         500
       );
     }
@@ -422,10 +434,10 @@ export class HighPerformanceProcessor {
     // 根据错误率调整处理策略
     if (metrics.errorRate > 5) {
       console.warn('High error rate detected, reducing batch size');
-      PERFORMANCE_CONFIG.MAX_BATCH_SIZE *= 0.7;
+      this.runtimeConfig.maxBatchSize = Math.max(500, Math.floor(this.runtimeConfig.maxBatchSize * 0.7));
     }
     
-    console.log(`Processing optimized: batch size = ${PERFORMANCE_CONFIG.MAX_BATCH_SIZE}`);
+    console.log(`Processing optimized: batch size = ${this.runtimeConfig.maxBatchSize}`);
   }
 
   /**
@@ -464,17 +476,17 @@ export class HighPerformanceProcessor {
     console.warn('🔥 Emergency throttling activated');
     
     // 限制新交易接收
-    const originalMaxQueue = PERFORMANCE_CONFIG.MAX_QUEUE_SIZE || 10000;
-    PERFORMANCE_CONFIG.MAX_QUEUE_SIZE = Math.floor(originalMaxQueue * 0.7);
+    const originalMaxQueue = this.runtimeConfig.maxQueueSize || 10000;
+    this.runtimeConfig.maxQueueSize = Math.floor(originalMaxQueue * 0.7);
     
     // 提高处理优先级阈值
-    const emergencyThreshold = PERFORMANCE_CONFIG.EMERGENCY_THRESHOLD || 8000;
-    PERFORMANCE_CONFIG.EMERGENCY_THRESHOLD = Math.floor(emergencyThreshold * 0.5);
+    const emergencyThreshold = this.runtimeConfig.emergencyThreshold || 8000;
+    this.runtimeConfig.emergencyThreshold = Math.floor(emergencyThreshold * 0.5);
     
     // 设置限流恢复定时器
     setTimeout(() => {
-      PERFORMANCE_CONFIG.MAX_QUEUE_SIZE = originalMaxQueue;
-      PERFORMANCE_CONFIG.EMERGENCY_THRESHOLD = emergencyThreshold;
+      this.runtimeConfig.maxQueueSize = originalMaxQueue;
+      this.runtimeConfig.emergencyThreshold = emergencyThreshold;
       console.log('Emergency throttling deactivated');
     }, 60000); // 1分钟后恢复
   }
