@@ -581,60 +581,18 @@ export class CandidateReplacementSystem {
   }
 
   /**
-   * 分配区块奖励给活跃节点和候补节点
+   * 分配区块奖励 - 使用竞争奖励系统
+   * 注意：此方法已弃用，请使用 CompetitiveRewardSystem.processBlockRewards()
    */
   async distributeBlockRewards(totalReward: number, blockNumber: number): Promise<void> {
-    try {
-      const activeValidators = Array.from(this.activeValidators.values());
-      const candidateNodes = Array.from(this.candidateNodes.values());
-      
-      // 计算奖励分配
-      const totalRewardBig = BigInt(Math.floor(totalReward));
-      const activeReward = (totalRewardBig * 80n) / 100n; // 80%
-      const candidateReward = totalRewardBig - activeReward; // 20%，保持整型精度
-      
-      // 分配给活跃验证节点
-      if (activeValidators.length > 0) {
-        const rewardPerActiveValidator = activeReward / BigInt(activeValidators.length);
-        
-        for (const validator of activeValidators) {
-          await this.executeRewardTransfer({
-            fromValidator: 'system',
-            toValidator: validator.address,
-            amount: rewardPerActiveValidator,
-            type: 'block_reward',
-            blockNumber,
-            timestamp: Date.now(),
-            epoch: 0
-          });
-        }
-      }
-      
-      // 分配给候补节点
-      if (candidateNodes.length > 0) {
-        const rewardPerCandidate = candidateReward / BigInt(candidateNodes.length);
-        
-        for (const candidate of candidateNodes) {
-          await this.executeRewardTransfer({
-            fromValidator: 'system',
-            toValidator: candidate.address,
-            amount: rewardPerCandidate,
-            type: 'staking_reward',
-            blockNumber,
-            timestamp: Date.now(),
-            epoch: 0
-          });
-        }
-      }
-      
-      console.log(`区块 #${blockNumber} 奖励分配完成:`);
-      console.log(`- 活跃节点 (${activeValidators.length}个): ${activeReward.toString()} 总奖励`);
-      console.log(`- 候补节点 (${candidateNodes.length}个): ${candidateReward.toString()} 总奖励`);
-      
-    } catch (error) {
-      console.error('分配区块奖励失败:', error);
-      throw error;
-    }
+    console.warn('distributeBlockRewards 方法已弃用，请使用 CompetitiveRewardSystem 进行奖励分配');
+    console.warn('当前调用将被忽略，请更新代码以使用新的竞争奖励机制');
+    
+    // 记录调用以便调试
+    console.log(`区块 #${blockNumber} 奖励分配请求被忽略 (总奖励: ${totalReward})`);
+    console.log('请使用以下方式进行奖励分配:');
+    console.log('1. 使用 CompetitiveBlockProduction.selectBlockProducer() 选择出块者');
+    console.log('2. 使用 CompetitiveRewardSystem.distributeBlockRewards() 分配奖励');
   }
 
   /**

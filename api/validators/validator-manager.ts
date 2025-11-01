@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { Validator, CandidateNode, StakingInfo, ValidatorPerformance } from '../../shared/types/blockchain.js';
 import { CONSENSUS_CONFIG, VALIDATOR_STATUS, API_ENDPOINTS } from '../../shared/constants/blockchain.js';
+import { blockchainInstance } from '../../shared/blockchain-instance.js';
 
 /**
  * 验证节点管理器
@@ -13,14 +14,25 @@ export class ValidatorManager {
   private performanceHistory: Map<string, ValidatorPerformance[]> = new Map();
   
   constructor() {
+    console.log('ValidatorManager initialized');
+    
     // 初始化创世验证节点
     this.initializeGenesisValidators();
     
-    // 定期更新性能统计
-    setInterval(() => this.updatePerformanceMetrics(), 60 * 1000); // 每分钟更新
+    // 启动性能监控
+    setInterval(() => {
+      this.updatePerformanceMetrics();
+    }, 30000); // 每30秒更新一次
     
-    // 定期分发奖励
-    setInterval(() => this.distributeRewards(), 24 * 60 * 60 * 1000); // 每天分发
+    // 启动奖励分发
+    setInterval(() => {
+      this.distributeRewards();
+    }, 60000); // 每分钟分发一次奖励
+
+    // 启动验证节点同步
+    setInterval(() => {
+      this.syncValidatorsFromBlockchain();
+    }, 10000); // 每10秒同步一次验证节点数据
   }
   
   /**
@@ -437,15 +449,97 @@ export class ValidatorManager {
    * 初始化创世验证节点
    */
   private initializeGenesisValidators(): void {
-    // 创建108个创世验证节点
-    for (let i = 0; i < CONSENSUS_CONFIG.MAX_VALIDATORS; i++) {
-      const address = `0x${i.toString(16).padStart(40, '0')}`;
-      const publicKey = `0x${(i + 1000).toString(16).padStart(128, '0')}`;
+    // 从区块链核心获取实际的验证节点
+    const blockchain = blockchainInstance.getBlockchain();
+    if (!blockchain) {
+      console.warn('Blockchain instance not available, using fallback validators');
+      this.createFallbackValidators();
+      return;
+    }
+
+    try {
+      // 获取区块链核心中的实际验证节点
+      const activeValidators = blockchain.getValidatorRankings();
       
+      if (activeValidators && activeValidators.length > 0) {
+        console.log(`Loading ${activeValidators.length} active validators from blockchain core`);
+        
+        for (const validatorRanking of activeValidators) {
+          // 使用实际的验证节点地址和数据
+          const validator: Validator = {
+            address: validatorRanking.address,
+            publicKey: `0x${validatorRanking.address.slice(2).padStart(128, '0')}`, // 生成公钥
+            stake: BigInt(validatorRanking.stake?.toString() || '0'),
+            delegatedStake: BigInt(0),
+            totalStake: BigInt(validatorRanking.totalStake?.toString() || '0'),
+            commission: 5,
+            status: VALIDATOR_STATUS.ACTIVE,
+            performance: {
+              blocksProduced: 0,
+              blocksExpected: 0,
+              uptime: 100,
+              missedBlocks: 0,
+              slashingEvents: 0,
+              averageBlockTime: CONSENSUS_CONFIG.BLOCK_TIME * 1000,
+              score: validatorRanking.score || 100
+            },
+            metadata: {
+              name: validatorRanking.address, // 使用实际地址作为名称
+              description: `Validator ${validatorRanking.address}`,
+              website: `https://validator.titanchain.io/${validatorRanking.address}`
+            },
+            joinedAt: Date.now(),
+            lastActiveBlock: 0
+          };
+          
+          this.validators.set(validatorRanking.address, validator);
+          
+          // 创建质押信息
+          const stakingInfo: StakingInfo = {
+            validator: validatorRanking.address,
+            delegator: validatorRanking.address,
+            amount: validator.stake,
+            rewards: BigInt(0),
+            lockPeriod: 0,
+            unlockTime: 0,
+            status: 'active'
+          };
+          
+          this.stakingInfo.set(validatorRanking.address, stakingInfo);
+        }
+        
+        console.log(`Initialized ${this.validators.size} validators from blockchain core`);
+      } else {
+        console.warn('No active validators found in blockchain core, using fallback');
+        this.createFallbackValidators();
+      }
+    } catch (error) {
+      console.error('Error loading validators from blockchain core:', error);
+      this.createFallbackValidators();
+    }
+  }
+
+  /**
+   * 创建备用验证节点（当无法从区块链核心获取时使用）
+   */
+  private createFallbackValidators(): void {
+    console.log('Creating fallback validators with actual addresses');
+    
+    // 创建一些具有实际地址格式的验证节点
+    const fallbackAddresses = [
+      '0x3c55a7fe31c21c186c6a0c0d7b91c4e7a933a933',
+      '0x742d35Cc6634C0532925a3b8D4C2B4e4c7a4B4a4',
+      '0x8ba1f109551bD432803012645Hac136c0c0c0c0c',
+      '0x9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e'
+    ];
+    
+    for (let i = 0; i < Math.min(fallbackAddresses.length, 4); i++) {
+      const address = fallbackAddresses[i];
       const stake = CONSENSUS_CONFIG.MIN_VALIDATOR_STAKE * BigInt(2);
+      
       const validator: Validator = {
         address,
-        publicKey,
+        publicKey: `0x${address.slice(2).padStart(128, '0')}`,
         stake,
         delegatedStake: BigInt(0),
         totalStake: stake,
@@ -461,9 +555,9 @@ export class ValidatorManager {
           score: 100
         },
         metadata: {
-          name: `Genesis Validator ${i + 1}`,
-          description: 'Genesis validator node',
-          website: `https://validator${i + 1}.titanchain.io`
+          name: address, // 使用实际地址作为名称
+          description: `Fallback Validator ${address}`,
+          website: `https://validator.titanchain.io/${address}`
         },
         joinedAt: Date.now(),
         lastActiveBlock: 0
@@ -485,9 +579,90 @@ export class ValidatorManager {
       this.stakingInfo.set(address, stakingInfo);
     }
     
-    console.log(`Initialized ${CONSENSUS_CONFIG.MAX_VALIDATORS} genesis validators`);
+    console.log(`Created ${this.validators.size} fallback validators`);
   }
-  
+
+  /**
+   * 从区块链核心同步验证节点数据
+   */
+  private async syncValidatorsFromBlockchain(): Promise<void> {
+    try {
+      const blockchain = blockchainInstance.getBlockchain();
+      if (!blockchain) {
+        return;
+      }
+
+      // 获取当前出块节点信息
+      const currentProducer = await blockchain.getCurrentBlockProducer();
+      const latestProducer = blockchain.getLatestBlockProducer();
+      
+      // 获取验证节点排名
+      const validatorRankings = blockchain.getValidatorRankings();
+      
+      if (validatorRankings && validatorRankings.length > 0) {
+        // 更新现有验证节点的性能数据
+        for (const ranking of validatorRankings) {
+          const existingValidator = this.validators.get(ranking.address);
+          if (existingValidator) {
+            // 更新性能评分
+            existingValidator.performance.score = ranking.score || 100;
+            existingValidator.stake = BigInt(ranking.stake?.toString() || '0');
+            existingValidator.totalStake = BigInt(ranking.totalStake?.toString() || '0');
+            
+            // 更新名称为实际地址
+            existingValidator.metadata.name = ranking.address;
+            
+            this.validators.set(ranking.address, existingValidator);
+          } else {
+            // 添加新的验证节点
+            const newValidator: Validator = {
+              address: ranking.address,
+              publicKey: `0x${ranking.address.slice(2).padStart(128, '0')}`,
+              stake: BigInt(ranking.stake?.toString() || '0'),
+              delegatedStake: BigInt(0),
+              totalStake: BigInt(ranking.totalStake?.toString() || '0'),
+              commission: 5,
+              status: VALIDATOR_STATUS.ACTIVE,
+              performance: {
+                blocksProduced: 0,
+                blocksExpected: 0,
+                uptime: 100,
+                missedBlocks: 0,
+                slashingEvents: 0,
+                averageBlockTime: CONSENSUS_CONFIG.BLOCK_TIME * 1000,
+                score: ranking.score || 100
+              },
+              metadata: {
+                name: ranking.address, // 使用实际地址作为名称
+                description: `Validator ${ranking.address}`,
+                website: `https://validator.titanchain.io/${ranking.address}`
+              },
+              joinedAt: Date.now(),
+              lastActiveBlock: 0
+            };
+            
+            this.validators.set(ranking.address, newValidator);
+            
+            // 创建质押信息
+            const stakingInfo: StakingInfo = {
+              validator: ranking.address,
+              delegator: ranking.address,
+              amount: newValidator.stake,
+              rewards: BigInt(0),
+              lockPeriod: 0,
+              unlockTime: 0,
+              status: 'active'
+            };
+            
+            this.stakingInfo.set(ranking.address, stakingInfo);
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error syncing validators from blockchain:', error);
+    }
+  }
+
   /**
    * 更新性能指标
    */

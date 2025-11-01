@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Search, X } from 'lucide-react';
 
 interface SearchResult {
@@ -9,6 +10,7 @@ interface SearchResult {
 }
 
 export const SearchBar: React.FC = () => {
+  const navigate = useNavigate();
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -24,60 +26,21 @@ export const SearchBar: React.FC = () => {
     setIsSearching(true);
     
     try {
-      // 模拟API搜索
-      const response = await fetch(`/api/search?q=${encodeURIComponent(searchQuery)}`);
+      // 调用搜索API
+      const apiUrl = `http://localhost:3001/api/explorer/search?q=${encodeURIComponent(searchQuery)}`;
+      
+      const response = await fetch(apiUrl);
       
       if (response.ok) {
         const data = await response.json();
+        
         setResults(data.results || []);
+        setShowResults(true);
       } else {
-        // 模拟搜索结果
-        const mockResults: SearchResult[] = [];
-        
-        // 检查是否是区块高度
-        if (/^\d+$/.test(searchQuery)) {
-          mockResults.push({
-            type: 'block',
-            id: searchQuery,
-            title: `Block #${searchQuery}`,
-            subtitle: 'Block height'
-          });
-        }
-        
-        // 检查是否是交易哈希
-        if (/^0x[a-fA-F0-9]{64}$/.test(searchQuery)) {
-          mockResults.push({
-            type: 'transaction',
-            id: searchQuery,
-            title: `${searchQuery.slice(0, 10)}...${searchQuery.slice(-8)}`,
-            subtitle: 'Transaction hash'
-          });
-        }
-        
-        // 检查是否是地址
-        if (/^0x[a-fA-F0-9]{40}$/.test(searchQuery)) {
-          mockResults.push({
-            type: 'address',
-            id: searchQuery,
-            title: `${searchQuery.slice(0, 10)}...${searchQuery.slice(-8)}`,
-            subtitle: 'Address'
-          });
-        }
-        
-        // 模糊搜索验证节点
-        if (searchQuery.toLowerCase().includes('validator') || searchQuery.toLowerCase().includes('node')) {
-          mockResults.push({
-            type: 'validator',
-            id: 'validator-1',
-            title: 'Validator Node #1',
-            subtitle: 'Active validator'
-          });
-        }
-        
-        setResults(mockResults);
+        console.error('Search API failed:', response.status);
+        setResults([]);
+        setShowResults(false);
       }
-      
-      setShowResults(true);
     } catch (error) {
       console.error('Search failed:', error);
       setResults([]);
@@ -92,9 +55,7 @@ export const SearchBar: React.FC = () => {
     
     // 延迟搜索以避免过多API调用
     setTimeout(() => {
-      if (value === query) {
-        handleSearch(value);
-      }
+      handleSearch(value);
     }, 300);
   };
   
@@ -106,16 +67,16 @@ export const SearchBar: React.FC = () => {
     // 根据结果类型导航到相应页面
     switch (result.type) {
       case 'block':
-        window.location.href = `/block/${result.id}`;
+        navigate(`/block/${result.id}`);
         break;
       case 'transaction':
-        window.location.href = `/tx/${result.id}`;
+        navigate(`/tx/${result.id}`);
         break;
       case 'address':
-        window.location.href = `/address/${result.id}`;
+        navigate(`/address/${result.id}`);
         break;
       case 'validator':
-        window.location.href = `/validator/${result.id}`;
+        navigate(`/validator/${result.id}`);
         break;
     }
   };
@@ -143,6 +104,7 @@ export const SearchBar: React.FC = () => {
   
   return (
     <div className="relative w-full">
+
       <div className="relative">
         <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
           <Search className="h-5 w-5 text-gray-400" />
@@ -176,7 +138,7 @@ export const SearchBar: React.FC = () => {
       
       {/* Search Results Dropdown */}
       {showResults && results.length > 0 && (
-        <div className="absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-96 overflow-y-auto">
+        <div className="absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-96 overflow-y-auto" style={{zIndex: 9999}}>
           {results.map((result, index) => (
             <button
               key={`${result.type}-${result.id}-${index}`}
@@ -208,7 +170,7 @@ export const SearchBar: React.FC = () => {
       
       {/* No Results */}
       {showResults && results.length === 0 && query.trim() && !isSearching && (
-        <div className="absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg">
+        <div className="absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg" style={{zIndex: 9999}}>
           <div className="px-4 py-6 text-center">
             <Search className="mx-auto h-8 w-8 text-gray-400 mb-2" />
             <p className="text-sm text-gray-500">No results found for &quot;{query}&quot;</p>

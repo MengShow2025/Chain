@@ -1,6 +1,9 @@
-import { Block, Transaction, Validator, ConsensusState } from '../../shared/types/blockchain.js';
+import { Block, Transaction, Validator, ValidatorCandidate, ConsensusState } from '../../shared/types/blockchain.js';
 import { CONSENSUS_CONFIG, VALIDATOR_STATUS } from '../../shared/constants/blockchain.js';
 import { BlockValidator } from '../core/block-validator.js';
+import { CompetitiveBlockProduction } from './competitive-block-production.js';
+import { ValidationWorkloadSystem } from './validation-workload-system.js';
+import { CompetitiveRewardSystem } from './competitive-reward-system.js';
 
 /**
  * PoS共识机制
@@ -12,6 +15,14 @@ export class PoSConsensus {
   private blockValidator: BlockValidator;
   private currentEpoch: number = 0;
   private epochStartTime: number = Date.now();
+
+  // 竞争出块和奖励系统
+  private competitiveBlockProduction: CompetitiveBlockProduction;
+  private validationWorkloadSystem: ValidationWorkloadSystem;
+  private competitiveRewardSystem: CompetitiveRewardSystem;
+  
+  // 出块者选择缓存，避免重复选择导致不一致
+  private blockProducerCache: Map<number, string> = new Map();
   
   constructor() {
     this.consensusState = {
@@ -29,6 +40,14 @@ export class PoSConsensus {
     };
     
     this.blockValidator = new BlockValidator();
+    
+    // 初始化新的竞争系统
+    this.competitiveBlockProduction = new CompetitiveBlockProduction();
+    this.validationWorkloadSystem = new ValidationWorkloadSystem();
+    this.competitiveRewardSystem = new CompetitiveRewardSystem(
+      this.competitiveBlockProduction,
+      this.validationWorkloadSystem
+    );
   }
   
   /**
@@ -40,18 +59,89 @@ export class PoSConsensus {
     // 添加创世验证节点
     for (const validator of genesisValidators) {
       this.validators.set(validator.address, validator);
+      
+      // 将活跃验证节点添加到竞争出块系统
+      if (validator.status === VALIDATOR_STATUS.ACTIVE) {
+        this.competitiveBlockProduction.addBlockProducer(validator);
+        console.log(`✅ 添加出块节点到竞争系统: ${validator.address}`);
+      }
+      
+      // 将验证节点添加到验证工作量系统（作为候补节点）
+      const candidateValidator: ValidatorCandidate = {
+        address: validator.address,
+        stake: validator.stake,
+        publicKey: validator.publicKey,
+        delegatedStake: validator.delegatedStake || BigInt(0),
+        totalStake: validator.totalStake || validator.stake,
+        commission: validator.commission || 0,
+        registeredAt: Date.now(),
+        lastElectionAttempt: 0,
+        electionAttempts: 0,
+        isEligible: true,
+        status: 'active',
+        metadata: validator.metadata,
+        readinessScore: 100,
+        violationHistory: []
+      };
+      this.validationWorkloadSystem.addCandidateValidator(candidateValidator);
+      console.log(`✅ 添加验证节点到工作量系统: ${validator.address}`);
     }
     
     // 更新共识状态
     this.updateConsensusState();
     
-    console.log('PoS consensus initialized successfully');
+    console.log(`🎉 PoS共识初始化完成 - 出块节点: ${this.competitiveBlockProduction.getValidatorWeights().size}, 验证节点: ${genesisValidators.length}`);
   }
   
   /**
-   * 选择下一个区块生产者
+   * 选择下一个区块生产者 - 使用竞争出块系统
    */
-  selectBlockProducer(blockNumber: number): string | null {
+  async selectBlockProducer(blockNumber: number): Promise<string | null> {
+    // 检查缓存，避免重复选择
+    if (this.blockProducerCache.has(blockNumber)) {
+      const cachedProducer = this.blockProducerCache.get(blockNumber)!;
+      console.log(`📋 使用缓存的出块者 - 区块 #${blockNumber}: ${cachedProducer}`);
+      return cachedProducer;
+    }
+
+    try {
+      // 获取前一个区块的哈希（简化实现）
+      const previousBlockHash = `block-${blockNumber - 1}`;
+      
+      // 使用竞争出块系统选择生产者
+      const result = await this.competitiveBlockProduction.selectBlockProducer(
+        blockNumber,
+        previousBlockHash
+      );
+      
+      if (result) {
+        console.log(`🎯 竞争出块选择结果 - 区块 #${blockNumber}: ${result.selectedProducer} (竞争者: ${result.competitorCount})`);
+        // 缓存选择结果
+        this.blockProducerCache.set(blockNumber, result.selectedProducer);
+        return result.selectedProducer;
+      } else {
+        console.warn(`⚠️ 竞争出块选择失败，回退到传统方式`);
+        const fallbackProducer = this.fallbackBlockProducerSelection(blockNumber);
+        if (fallbackProducer) {
+          this.blockProducerCache.set(blockNumber, fallbackProducer);
+        }
+        return fallbackProducer;
+      }
+      
+    } catch (error) {
+      console.error(`❌ 竞争出块选择错误，回退到传统方式:`, error);
+      const fallbackProducer = this.fallbackBlockProducerSelection(blockNumber);
+      if (fallbackProducer) {
+        this.blockProducerCache.set(blockNumber, fallbackProducer);
+      }
+      return fallbackProducer;
+    }
+  }
+  
+  /**
+   * 回退的区块生产者选择方式（保持兼容性）
+   */
+  private fallbackBlockProducerSelection(blockNumber: number): string | null {
     const activeValidators = this.getActiveValidators();
     
     if (activeValidators.length === 0) {
@@ -87,7 +177,7 @@ export class PoSConsensus {
    * 验证区块生产者权限
    */
   async validateBlockProducer(block: Block): Promise<boolean> {
-    const expectedProducer = this.selectBlockProducer(block.number);
+    const expectedProducer = await this.selectBlockProducer(block.number);
     
     if (!expectedProducer) {
       console.error('No expected block producer found');
@@ -126,14 +216,20 @@ export class PoSConsensus {
         return false;
       }
       
-      // 3. 更新验证节点统计
+      // 3. 记录验证工作量（模拟其他验证节点的验证工作）
+      this.recordValidationWork(block);
+      
+      // 4. 更新验证节点统计
       this.updateValidatorStats(block.validator, block);
       
-      // 4. 更新共识状态
+      // 5. 更新共识状态
       this.updateConsensusState();
       
-      // 5. 检查是否需要切换epoch
+      // 6. 检查是否需要切换epoch
       await this.checkEpochTransition(block);
+      
+      // 7. 清理旧的缓存（保留最近10个区块的缓存）
+      this.cleanupBlockProducerCache(block.number);
       
       console.log(`Block #${block.number} processed successfully`);
       return true;
@@ -141,6 +237,20 @@ export class PoSConsensus {
     } catch (error) {
       console.error('Error processing new block:', error);
       return false;
+    }
+  }
+  
+  /**
+   * 清理区块生产者缓存
+   */
+  private cleanupBlockProducerCache(currentBlockNumber: number): void {
+    const cacheLimit = 10;
+    const minBlockToKeep = currentBlockNumber - cacheLimit;
+    
+    for (const [blockNumber] of this.blockProducerCache) {
+      if (blockNumber < minBlockToKeep) {
+        this.blockProducerCache.delete(blockNumber);
+      }
     }
   }
   
@@ -164,6 +274,11 @@ export class PoSConsensus {
       
       // 添加验证节点
       this.validators.set(validator.address, validator);
+      
+      // 添加到竞争出块系统（活跃验证节点）
+      if (validator.status === VALIDATOR_STATUS.ACTIVE) {
+        this.competitiveBlockProduction.addBlockProducer(validator);
+      }
       
       // 更新共识状态
       this.updateConsensusState();
@@ -190,6 +305,12 @@ export class PoSConsensus {
       
       // 更新状态为非活跃
       validator.status = VALIDATOR_STATUS.INACTIVE;
+      
+      // 从竞争出块系统中移除
+      this.competitiveBlockProduction.removeBlockProducer(address);
+      
+      // 从验证工作量系统中移除
+      this.validationWorkloadSystem.removeCandidateValidator(address);
       
       // 更新共识状态
       this.updateConsensusState();
@@ -279,6 +400,46 @@ export class PoSConsensus {
     return BigInt(seed) % BigInt(Number.MAX_SAFE_INTEGER);
   }
   
+  /**
+   * 记录验证工作量（模拟其他验证节点的验证工作）
+   */
+  private recordValidationWork(block: Block): void {
+    const activeValidators = this.getActiveValidators();
+    const blockProducer = block.validator;
+    
+    // 为除了出块者之外的其他验证节点记录验证工作
+    for (const validator of activeValidators) {
+      if (validator.address !== blockProducer) {
+        // 模拟验证工作：区块验证
+        this.validationWorkloadSystem.recordValidationWork(
+          validator.address,
+          'block_verification' as any, // 使用字符串避免导入枚举
+          block.number,
+          {
+            blockHash: block.hash,
+            transactionCount: block.transactions.length,
+            gasUsed: block.gasUsed
+          },
+          Math.floor(Math.random() * 20) + 80 // 80-100的质量分数
+        );
+        
+        // 随机模拟一些交易验证工作
+        if (block.transactions.length > 0 && Math.random() > 0.5) {
+          this.validationWorkloadSystem.recordValidationWork(
+            validator.address,
+            'transaction_validation' as any,
+            block.number,
+            {
+              transactionHashes: block.transactions.map(tx => tx.hash),
+              validatedCount: block.transactions.length
+            },
+            Math.floor(Math.random() * 15) + 85 // 85-100的质量分数
+          );
+        }
+      }
+    }
+  }
+
   /**
    * 更新验证节点统计
    */
@@ -559,18 +720,83 @@ export class PoSConsensus {
   }
 
   /**
-   * 分发奖励给验证节点
+   * 分发奖励给验证节点 - 使用新的竞争奖励系统
    */
-  async distributeBlockRewards(blockNumber: number, blockReward: bigint): Promise<void> {
+  async distributeBlockRewards(blockNumber: number, blockReward: bigint, evmEngine?: any): Promise<void> {
+    try {
+      // 设置奖励转账回调
+      this.competitiveRewardSystem.setRewardTransferCallback(async (transfer) => {
+        const validator = this.validators.get(transfer.toValidator);
+        if (validator) {
+          // 更新验证节点总奖励
+          (validator as any).totalRewards = ((validator as any).totalRewards || BigInt(0)) + transfer.amount;
+          
+          // 如果有EVM引擎，实际更新账户余额
+          if (evmEngine && transfer.amount > BigInt(0)) {
+            try {
+              const currentBalance = await evmEngine.getBalance(transfer.toValidator);
+              const newBalance = currentBalance + transfer.amount;
+              await evmEngine.updateBalance(transfer.toValidator, newBalance);
+              
+              console.log(`✅ ${transfer.type}: ${transfer.amount} TTN -> ${transfer.toValidator} (余额: ${newBalance})`);
+            } catch (error) {
+              console.error(`❌ 奖励转账失败 ${transfer.toValidator}:`, error);
+            }
+          } else {
+            console.log(`📝 ${transfer.type}: ${transfer.amount} TTN -> ${transfer.toValidator} (内部记录)`);
+          }
+        }
+      });
+
+      // 获取前一个区块的哈希（简化实现）
+      const previousBlockHash = `block-${blockNumber - 1}`;
+      
+      // 使用竞争奖励系统处理完整的奖励流程
+      const result = await this.competitiveRewardSystem.processBlockRewards(
+        blockNumber,
+        previousBlockHash,
+        blockReward
+      );
+
+      if (result) {
+        console.log(`🎉 区块 #${blockNumber} 竞争奖励分配完成:`);
+        console.log(`   出块者: ${result.blockProducer} (奖励: ${result.blockProducerReward})`);
+        console.log(`   验证节点: ${result.validationRewards.size} 个 (总奖励: ${result.totalReward - result.blockProducerReward})`);
+      } else {
+        console.warn(`⚠️ 区块 #${blockNumber} 奖励分配失败，回退到传统方式`);
+        await this.fallbackRewardDistribution(blockNumber, blockReward, evmEngine);
+      }
+
+    } catch (error) {
+      console.error(`❌ 竞争奖励系统失败，回退到传统方式:`, error);
+      await this.fallbackRewardDistribution(blockNumber, blockReward, evmEngine);
+    }
+  }
+
+  /**
+   * 回退奖励分配方式（保持兼容性）
+   */
+  private async fallbackRewardDistribution(blockNumber: number, blockReward: bigint, evmEngine?: any): Promise<void> {
+    console.log(`🔄 使用传统奖励分配方式处理区块 #${blockNumber}`);
+    
     const rewards = this.calculateRewards(blockNumber, blockReward);
     
     for (const [validatorAddress, reward] of rewards) {
       const validator = this.validators.get(validatorAddress);
       if (validator) {
-        // 更新验证节点总奖励（需要添加到Validator类型中）
         (validator as any).totalRewards = ((validator as any).totalRewards || BigInt(0)) + reward;
         
-        console.log(`Distributed ${reward} TTN to validator ${validatorAddress}`);
+        if (evmEngine && reward > BigInt(0)) {
+          try {
+            const currentBalance = await evmEngine.getBalance(validatorAddress);
+            const newBalance = currentBalance + reward;
+            await evmEngine.updateBalance(validatorAddress, newBalance);
+            
+            console.log(`📊 传统奖励: ${reward} TTN -> ${validatorAddress} (余额: ${newBalance})`);
+          } catch (error) {
+            console.error(`❌ 传统奖励转账失败 ${validatorAddress}:`, error);
+          }
+        }
       }
     }
   }
@@ -580,11 +806,41 @@ export class PoSConsensus {
    */
   canProduceBlock(validatorAddress: string, blockNumber: number): boolean {
     const validator = this.validators.get(validatorAddress);
-    if (!validator || validator.status !== VALIDATOR_STATUS.ACTIVE) {
+    if (!validator || validator.status !== 'active') {
       return false;
     }
     
-    const expectedProducer = this.selectBlockProducer(blockNumber);
-    return expectedProducer === validatorAddress;
+    // 简化检查：如果验证节点是活跃的，就可以参与竞争出块
+    // 具体的选择逻辑由竞争出块系统处理
+    return true;
+  }
+
+  /**
+   * 添加候补验证节点到验证工作量系统
+   */
+  addCandidateValidator(candidate: any): void {
+    this.validationWorkloadSystem.addCandidateValidator(candidate);
+    console.log(`候补验证节点 ${candidate.address} 已添加到验证工作量系统`);
+  }
+
+  /**
+   * 获取竞争奖励系统状态
+   */
+  getCompetitiveRewardSystemStatus() {
+    return this.competitiveRewardSystem.getSystemStatus();
+  }
+
+  /**
+   * 获取出块竞争统计
+   */
+  getBlockProductionStats() {
+    return this.competitiveBlockProduction.getSystemStatus();
+  }
+
+  /**
+   * 获取验证工作量统计
+   */
+  getValidationWorkloadStats() {
+    return this.validationWorkloadSystem.getSystemStatus();
   }
 }

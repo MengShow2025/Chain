@@ -438,12 +438,28 @@ export class ExplorerService {
       
       // 检查是否是区块高度
       if (/^\d+$/.test(query)) {
-        results.push({
-          type: 'block',
-          id: query,
-          title: `Block #${query}`,
-          subtitle: 'Block height'
-        });
+        const blockHeight = parseInt(query);
+        
+        // 验证区块是否存在
+        if (this.blockchain) {
+          const currentHeight = this.blockchain.getBlockHeight();
+          if (blockHeight <= currentHeight && blockHeight >= 0) {
+            results.push({
+              type: 'block',
+              id: query,
+              title: `Block #${query}`,
+              subtitle: `Block height (Current: ${currentHeight})`
+            });
+          }
+        } else {
+          // 如果区块链实例不可用，仍然返回结果但标注为未验证
+          results.push({
+            type: 'block',
+            id: query,
+            title: `Block #${query}`,
+            subtitle: 'Block height (unverified)'
+          });
+        }
       }
       
       // 检查是否是交易哈希
@@ -458,12 +474,34 @@ export class ExplorerService {
       
       // 检查是否是地址
       if (/^0x[a-fA-F0-9]{40}$/.test(query)) {
+        // 检查是否是已知的验证节点地址
+        const knownValidators = [
+          '0x3c55a5681d272E8787C818e2d164c0ABFd90a933', // 区块生产者
+          '0x151bBae42e263EbfBD6740C966420B852d9156dE'  // 验证节点
+        ];
+        
+        const isValidator = knownValidators.some(addr => addr.toLowerCase() === query.toLowerCase());
+        
         results.push({
           type: 'address',
           id: query,
           title: `${query.slice(0, 10)}...${query.slice(-8)}`,
-          subtitle: 'Address'
+          subtitle: isValidator ? 'Validator Address' : 'Address'
         });
+      }
+      
+      // 检查是否是区块哈希
+      if (/^0x[a-fA-F0-9]{64}$/.test(query)) {
+        // 如果已经作为交易哈希添加，也添加为区块哈希的可能性
+        const existingTx = results.find(r => r.type === 'transaction' && r.id === query);
+        if (existingTx) {
+          results.push({
+            type: 'block',
+            id: query,
+            title: `${query.slice(0, 10)}...${query.slice(-8)}`,
+            subtitle: 'Block hash'
+          });
+        }
       }
       
       // 模糊搜索验证节点

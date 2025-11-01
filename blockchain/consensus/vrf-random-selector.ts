@@ -54,7 +54,7 @@ export class VRFRandomSelector {
     const seed = this.buildRandomSeed(blockHash, timestamp, additionalEntropy);
     
     // 生成VRF证明
-    const vrfProof = this.generateVRFProof(seed);
+    const vrfProof = this.generateVRFProofInternal(seed);
     
     // 基于VRF输出进行选择
     const selectedObjects = this.performSelection(candidates, count, vrfProof.output);
@@ -92,9 +92,9 @@ export class VRFRandomSelector {
   }
   
   /**
-   * 生成VRF证明
+   * 生成VRF证明（内部方法）
    */
-  private generateVRFProof(seed: string): VRFProof {
+  private generateVRFProofInternal(seed: string): VRFProof {
     // 使用HMAC作为VRF的简化实现
     // 在生产环境中应该使用更严格的VRF实现，如ECVRF
     const hmac = crypto.createHmac('sha256', this.privateKey);
@@ -115,6 +115,23 @@ export class VRFRandomSelector {
     };
   }
   
+  /**
+   * 公共方法：生成VRF证明
+   */
+  async generateVRFProof(seed: string): Promise<{ success: boolean; proof?: string; output?: string }> {
+    try {
+      const vrfProof = this.generateVRFProofInternal(seed);
+      return {
+        success: true,
+        proof: vrfProof.proof,
+        output: vrfProof.output
+      };
+    } catch (error) {
+      console.error('VRF proof generation failed:', error);
+      return { success: false };
+    }
+  }
+
   /**
    * 验证VRF证明
    */
@@ -300,7 +317,7 @@ export class VRFRandomSelector {
     }
 
     const seed = this.buildRandomSeed(blockHash, timestamp);
-    const vrfProof = this.generateVRFProof(seed);
+    const vrfProof = this.generateVRFProofInternal(seed);
     const result: RandomSelectionResult = {
       selectedCandidates: enforcedObjects.map(c => c.address),
       vrfProof,

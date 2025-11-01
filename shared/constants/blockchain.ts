@@ -107,6 +107,33 @@ export const TOKEN_CONFIG = {
   INITIAL_BLOCK_REWARD: BigInt('5000000000000000000'), // 初始区块奖励 (5 TTN)
   REWARD_DECAY_RATE: 0.98, // 奖励衰减率 (每年2%)
   VALIDATOR_COMMISSION_MAX: 0.2, // 验证节点最大佣金比例 20%
+  
+  // 原生代币配置
+  NATIVE_TOKENS: {
+    TTN: {
+      symbol: 'TTN',
+      name: 'TitanChain Token',
+      decimals: 18,
+      address: '0x0000000000000000000000000000000000000000', // 原生ETH地址约定
+      isNative: true,
+      totalSupply: BigInt('1000000000000000000000000000'), // 10亿 TTN
+    },
+    ttUSD: {
+      symbol: 'ttUSD',
+      name: 'TitanChain USD',
+      decimals: 18,
+      address: '0x0000000000000000000000000000000000000001', // 原生稳定币地址
+      isNative: true,
+      totalSupply: BigInt('1000000000000000000000000000'), // 10亿 ttUSD
+      pegged: 'USD', // 锚定美元
+    }
+  },
+  
+  // 原生代币地址列表（用于快速查找）
+  NATIVE_TOKEN_ADDRESSES: [
+    '0x0000000000000000000000000000000000000000', // TTN
+    '0x0000000000000000000000000000000000000001', // ttUSD
+  ] as string[],
 } as const;
 
 // 0-gas费机制配置

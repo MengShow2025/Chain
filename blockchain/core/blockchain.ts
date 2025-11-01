@@ -222,14 +222,15 @@ export class TitanChain {
       console.log(`Active validators count: ${activeValidators.length}`);
       
       // 选择区块生产者
-      const producer = this.consensusEngine.selectBlockProducer(nextBlockNumber);
+      console.log(`🔍 区块链核心开始选择区块 #${nextBlockNumber} 的出块者`);
+      const producer = await this.consensusEngine.selectBlockProducer(nextBlockNumber);
       if (!producer) {
         console.error('No block producer selected');
         console.log('Available validators:', activeValidators.map(v => v.address));
         return null;
       }
       
-      console.log(`Block producer selected: ${producer}`);
+      console.log(`🎯 区块链核心最终选择的出块者: ${producer}`);
       
       // 获取待打包交易
       const transactions = this.transactionPool.getTransactionsForBlock(
@@ -254,6 +255,23 @@ export class TitanChain {
       for (const tx of transactions) {
         const result = await this.evmEngine.executeTransaction(tx);
         executionResults.push(result);
+        
+        // 处理交易gas费分配
+        if (result.success && result.gasUsed > BigInt(0)) {
+          const gasFee = tx.gas * tx.gasPrice;
+          const allocation = this.evmEngine.processGasFeeAllocation(tx, gasFee);
+          
+          // 如果是非原生代币交易，将gas费添加到奖励池
+          if (!allocation.isNativeToken && allocation.toRewardPool > BigInt(0)) {
+            // 这里可以调用MultiRewardPoolManager来处理gas费
+            console.log(`非原生代币交易gas费 ${allocation.toRewardPool} 将添加到奖励池`);
+          }
+          
+          // 验证节点获得的gas费部分
+          if (allocation.toValidator > BigInt(0)) {
+            console.log(`验证节点 ${producer} 获得gas费奖励: ${allocation.toValidator}`);
+          }
+        }
       }
       
       // 计算gas使用量
@@ -305,7 +323,7 @@ export class TitanChain {
       this.currentBlock = newBlock;
 
       // 分发本块奖励到验证者（PoS 共识层）
-      await this.consensusEngine.distributeBlockRewards(nextBlockNumber, blockReward);
+      await this.consensusEngine.distributeBlockRewards(nextBlockNumber, blockReward, this.evmEngine);
       
       // 从交易池中移除已打包交易
       this.transactionPool.removeTransactions(transactions.map(tx => tx.hash));
@@ -843,5 +861,41 @@ export class TitanChain {
       queueStatus: this.getQueueStatus(),
       microBatchStatus: this.getMicroBatchStatus()
     };
+  }
+
+  /**
+   * 获取当前出块节点
+   */
+  async getCurrentBlockProducer(): Promise<{ address: string; blockNumber: number } | null> {
+    try {
+      if (!this.currentBlock) {
+        return null;
+      }
+      
+      const nextBlockNumber = this.currentBlock.number + 1;
+      const producer = await this.consensusEngine.selectBlockProducer(nextBlockNumber);
+      
+      if (producer) {
+        return {
+          address: producer,
+          blockNumber: nextBlockNumber
+        };
+      }
+      
+      return null;
+    } catch (error) {
+      console.error('Error getting current block producer:', error);
+      return null;
+    }
+  }
+
+  /**
+   * 获取最新区块的出块者
+   */
+  getLatestBlockProducer(): string | null {
+    if (!this.currentBlock) {
+      return null;
+    }
+    return this.currentBlock.validator;
   }
 }

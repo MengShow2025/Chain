@@ -1,5 +1,9 @@
 import { Transaction, Account, Contract, Log, EVMState } from '../../shared/types/blockchain.js';
 import { ZERO_GAS_CONFIG, ERROR_CODES } from '../../shared/constants/blockchain.js';
+import { calculateGasFeeAllocation, isNativeTokenTransaction, getTransactionTokenType, shouldBeZeroGasTransaction } from '../../shared/utils/native-token-utils.js';
+import { smartGasEngine } from '../gas/smart-gas-engine.js';
+import { networkCongestionMonitor } from '../gas/network-congestion-monitor.js';
+import { gasStabilityPool } from '../gas/gas-stability-pool.js';
 
 /**
  * EVM执行器
@@ -34,9 +38,22 @@ export class EVMExecutor {
     try {
       console.log(`Executing transaction ${tx.hash}`);
       
-      // 1. 预执行检查
+      // 0. 自动标记0-gas费交易
+      if (!tx.isZeroGas && shouldBeZeroGasTransaction(tx)) {
+        tx.isZeroGas = true;
+        console.log(`自动标记交易 ${tx.hash} 为0-gas费交易`);
+      }
+      
+      // 1. 计算gas费用
+      const gasCost = this.calculateGasCost(tx);
+      
+      // 2. 预执行检查
       const preCheck = await this.preExecutionCheck(tx);
       if (!preCheck.success) {
+        // 即使预检查失败，也要扣除gas费（除非是0-gas费交易）
+        if (gasCost > BigInt(0)) {
+          await this.deductGasFee(tx.from, gasCost);
+        }
         return {
           success: false,
           gasUsed: BigInt(21000), // 基础gas消耗
@@ -45,8 +62,7 @@ export class EVMExecutor {
         };
       }
       
-      // 2. 扣除gas费用
-      const gasCost = this.calculateGasCost(tx);
+      // 3. 扣除gas费用
       if (!await this.deductGasFee(tx.from, gasCost)) {
         return {
           success: false,
@@ -54,6 +70,11 @@ export class EVMExecutor {
           logs: [],
           error: 'Insufficient balance for gas'
         };
+      }
+      
+      // 记录0-gas费交易
+      if (gasCost === BigInt(0)) {
+        console.log(`✅ 0-gas费交易执行: ${tx.hash}, 类型: ${isNativeTokenTransaction(tx) ? '原生代币' : '链下撮合'}`);
       }
       
       // 3. 执行交易逻辑
@@ -83,6 +104,13 @@ export class EVMExecutor {
       
     } catch (error) {
       console.error('Transaction execution error:', error);
+      
+      // 即使交易执行失败，也要扣除gas费（除非是0-gas费交易）
+      const gasCost = this.calculateGasCost(tx);
+      if (gasCost > BigInt(0)) {
+        await this.deductGasFee(tx.from, gasCost);
+      }
+      
       return {
         success: false,
         gasUsed: BigInt(21000),
@@ -98,7 +126,14 @@ export class EVMExecutor {
   private async preExecutionCheck(tx: Transaction): Promise<{ success: boolean; error?: string }> {
     // 检查账户余额
     const account = await this.getAccount(tx.from);
-    const totalCost = tx.value + (tx.gas * tx.gasPrice);
+    
+    // 对于0-gas费交易，只检查转账金额，不检查gas费
+    let totalCost: bigint;
+    if (tx.isZeroGas || shouldBeZeroGasTransaction(tx)) {
+      totalCost = tx.value; // 0-gas费交易只需要检查转账金额
+    } else {
+      totalCost = tx.value + (tx.gas * tx.gasPrice); // 普通交易需要检查转账金额+gas费
+    }
     
     if (account.balance < totalCost) {
       return { success: false, error: 'Insufficient balance' };
@@ -118,31 +153,100 @@ export class EVMExecutor {
   }
   
   /**
-   * 计算gas费用
+   * 计算gas费用 - 集成智能gas费系统
    */
   private calculateGasCost(tx: Transaction): bigint {
-    // 0-gas费交易处理
-    if (tx.isZeroGas) {
-      if (tx.exchangeBatch) {
-        return BigInt(0); // 交易所批量处理免费
+    // 检查是否为0-gas费交易
+    if (tx.isZeroGas || shouldBeZeroGasTransaction(tx)) {
+      // 原生代币交易完全免费
+      if (isNativeTokenTransaction(tx)) {
+        return BigInt(0);
       }
       
+      // 链下撮合交易完全免费
+      if (tx.exchangeBatch) {
+        return BigInt(0);
+      }
+      
+      // 智能合约分层收费（如果有配置）
       if (tx.contractTier) {
-        // 智能合约分层收费
         const tierConf = ZERO_GAS_CONFIG.CONTRACT_TIER_FEES[tx.contractTier as keyof typeof ZERO_GAS_CONFIG.CONTRACT_TIER_FEES];
         const tierFee = tierConf?.fee ?? BigInt(0);
         return tierFee;
       }
+      
+      // 其他0-gas费交易也免费
+      return BigInt(0);
     }
     
-    // 普通交易gas费用
-    return tx.gas * tx.gasPrice;
+    // 普通交易使用智能gas费系统
+    return this.calculateSmartGasCost(tx);
+  }
+
+  /**
+   * 使用智能gas费系统计算费用
+   */
+  private calculateSmartGasCost(tx: Transaction): bigint {
+    try {
+      // 获取网络拥堵因子
+      const congestionFactor = networkCongestionMonitor.getCongestionFactor();
+      
+      // 计算智能gas价格
+      const smartGasResult = smartGasEngine.calculateSmartGasPrice(congestionFactor);
+      
+      // 应用稳定性缓冲池
+      const stabilizedGasPrice = gasStabilityPool.getStabilizedPrice(smartGasResult.gasPrice);
+      
+      // 计算最终gas费用
+      const gasCost = tx.gas * stabilizedGasPrice;
+      
+      console.log(`智能gas费计算 - 交易: ${tx.hash}`);
+      console.log(`  原始gasPrice: ${tx.gasPrice}`);
+      console.log(`  智能gasPrice: ${smartGasResult.gasPrice}`);
+      console.log(`  稳定化gasPrice: ${stabilizedGasPrice}`);
+      console.log(`  拥堵因子: ${congestionFactor}`);
+      console.log(`  调整原因: ${smartGasResult.adjustmentReason}`);
+      console.log(`  最终gas费用: ${gasCost}`);
+      
+      return gasCost;
+      
+    } catch (error) {
+      console.error('智能gas费计算失败，使用原始价格:', error);
+      // 降级到原始gas费计算
+      return tx.gas * tx.gasPrice;
+    }
+  }
+
+  /**
+   * 处理交易gas费分配
+   * 根据代币类型决定gas费的分配方式
+   */
+  processGasFeeAllocation(tx: Transaction, gasFee: bigint): {
+    toRewardPool: bigint;
+    toValidator: bigint;
+    tokenType: 'TTN' | 'ttUSD' | 'OTHER';
+    isNativeToken: boolean;
+  } {
+    const allocation = calculateGasFeeAllocation(tx, gasFee);
+    const isNative = isNativeTokenTransaction(tx);
+    
+    console.log(`Gas费分配 - 交易: ${tx.hash}, 代币类型: ${allocation.tokenType}, 原生代币: ${isNative}, 奖励池: ${allocation.toRewardPool}, 验证节点: ${allocation.toValidator}`);
+    
+    return {
+      ...allocation,
+      isNativeToken: isNative
+    };
   }
   
   /**
    * 扣除gas费用
    */
   private async deductGasFee(from: string, gasCost: bigint): Promise<boolean> {
+    // 如果gas费为0，直接返回成功，不扣除任何费用
+    if (gasCost === BigInt(0)) {
+      return true;
+    }
+    
     const account = await this.getAccount(from);
     
     if (account.balance < gasCost) {
@@ -626,5 +730,188 @@ export class EVMExecutor {
       logs: []
     };
     this.gasUsed = BigInt(0);
+  }
+
+  /**
+   * 获取账户余额（公共方法）
+   */
+  async getAccountBalance(address: string): Promise<bigint> {
+    const account = await this.getAccount(address);
+    return account.balance;
+  }
+
+  /**
+   * 创建账户（公共方法）
+   */
+  async createAccount(address: string, balance: bigint): Promise<void> {
+    const account: Account = {
+      address,
+      balance,
+      nonce: 0
+    };
+    this.state.accounts.set(address, account);
+  }
+
+  /**
+   * 获取账户信息（公共方法）
+   */
+  async getAccountInfo(address: string): Promise<Account> {
+    return await this.getAccount(address);
+  }
+
+  /**
+   * 获取账户余额（别名方法）
+   */
+  async getBalance(address: string): Promise<bigint> {
+    return await this.getAccountBalance(address);
+  }
+
+  /**
+   * 更新账户余额
+   */
+  async updateBalance(address: string, newBalance: bigint): Promise<void> {
+    const account = await this.getAccount(address);
+    account.balance = newBalance;
+    this.state.accounts.set(address, account);
+  }
+
+  /**
+   * 获取智能gas费价格等级
+   */
+  public getGasPriceTiers(): {
+    slow: { gasPrice: bigint; estimatedTime: number; costUSD: number };
+    standard: { gasPrice: bigint; estimatedTime: number; costUSD: number };
+    fast: { gasPrice: bigint; estimatedTime: number; costUSD: number };
+  } {
+    try {
+      const congestionFactor = networkCongestionMonitor.getCongestionFactor();
+      const tiers = smartGasEngine.getGasPriceTiers(congestionFactor);
+      const networkSummary = networkCongestionMonitor.getNetworkSummary();
+      
+      // 标准gas限制用于估算
+      const standardGasLimit = BigInt(21000);
+      
+      return {
+        slow: {
+          gasPrice: gasStabilityPool.getStabilizedPrice(tiers.slow.gasPrice),
+          estimatedTime: networkSummary.congestion.estimatedWaitTime * 1.5,
+          costUSD: smartGasEngine.estimateTransactionCostUSD(standardGasLimit, tiers.slow.gasPrice)
+        },
+        standard: {
+          gasPrice: gasStabilityPool.getStabilizedPrice(tiers.standard.gasPrice),
+          estimatedTime: networkSummary.congestion.estimatedWaitTime,
+          costUSD: smartGasEngine.estimateTransactionCostUSD(standardGasLimit, tiers.standard.gasPrice)
+        },
+        fast: {
+          gasPrice: gasStabilityPool.getStabilizedPrice(tiers.fast.gasPrice),
+          estimatedTime: networkSummary.congestion.estimatedWaitTime * 0.7,
+          costUSD: smartGasEngine.estimateTransactionCostUSD(standardGasLimit, tiers.fast.gasPrice)
+        }
+      };
+    } catch (error) {
+      console.error('获取gas价格等级失败:', error);
+      // 返回默认值
+      const defaultGasPrice = BigInt('20000000000'); // 20 Gwei
+      return {
+        slow: { gasPrice: defaultGasPrice, estimatedTime: 120, costUSD: 0.001 },
+        standard: { gasPrice: defaultGasPrice, estimatedTime: 60, costUSD: 0.001 },
+        fast: { gasPrice: defaultGasPrice, estimatedTime: 30, costUSD: 0.002 }
+      };
+    }
+  }
+
+  /**
+   * 获取网络状态和gas费建议
+   */
+  public getNetworkStatus(): {
+    congestion: string;
+    trend: string;
+    recommendation: string;
+    gasOptimization: string;
+    stabilityScore: number;
+  } {
+    try {
+      const networkSummary = networkCongestionMonitor.getNetworkSummary();
+      const stabilityMetrics = gasStabilityPool.getStabilityMetrics();
+      const gasOptimization = smartGasEngine.getOptimizationSuggestion();
+      
+      return {
+        congestion: networkSummary.congestion.description,
+        trend: networkSummary.trend === 'increasing' ? '拥堵加剧' : 
+               networkSummary.trend === 'decreasing' ? '拥堵缓解' : '稳定',
+        recommendation: networkSummary.recommendation,
+        gasOptimization,
+        stabilityScore: stabilityMetrics.stabilityScore
+      };
+    } catch (error) {
+      console.error('获取网络状态失败:', error);
+      return {
+        congestion: '网络状态未知',
+        trend: '稳定',
+        recommendation: '可以正常进行交易',
+        gasOptimization: '当前是交易的好时机',
+        stabilityScore: 50
+      };
+    }
+  }
+
+  /**
+   * 估算交易费用（包含智能gas费）
+   */
+  public estimateTransactionFee(tx: Partial<Transaction>): {
+    estimatedGasCost: bigint;
+    costUSD: number;
+    gasPrice: bigint;
+    adjustmentReason: string;
+  } {
+    try {
+      const mockTx: Transaction = {
+         hash: 'estimate',
+         from: tx.from || '0x0000000000000000000000000000000000000000',
+         to: tx.to || '0x0000000000000000000000000000000000000000',
+         value: tx.value || BigInt(0),
+         gas: tx.gas || BigInt(21000),
+         gasPrice: tx.gasPrice || BigInt('20000000000'),
+         nonce: tx.nonce || 0,
+         data: tx.data || '0x',
+         timestamp: Date.now(),
+         status: 'pending',
+         isZeroGas: tx.isZeroGas || false
+       };
+      
+      // 检查是否为0-gas费交易
+      if (mockTx.isZeroGas || shouldBeZeroGasTransaction(mockTx)) {
+        return {
+          estimatedGasCost: BigInt(0),
+          costUSD: 0,
+          gasPrice: BigInt(0),
+          adjustmentReason: '0-gas费交易'
+        };
+      }
+      
+      const congestionFactor = networkCongestionMonitor.getCongestionFactor();
+      const smartGasResult = smartGasEngine.calculateSmartGasPrice(congestionFactor);
+      const stabilizedGasPrice = gasStabilityPool.getStabilizedPrice(smartGasResult.gasPrice);
+      const estimatedGasCost = mockTx.gas * stabilizedGasPrice;
+      const costUSD = smartGasEngine.estimateTransactionCostUSD(mockTx.gas, stabilizedGasPrice);
+      
+      return {
+        estimatedGasCost,
+        costUSD,
+        gasPrice: stabilizedGasPrice,
+        adjustmentReason: smartGasResult.adjustmentReason
+      };
+      
+    } catch (error) {
+      console.error('估算交易费用失败:', error);
+      const fallbackGasPrice = BigInt('20000000000');
+      const fallbackGas = BigInt(21000);
+      return {
+        estimatedGasCost: fallbackGas * fallbackGasPrice,
+        costUSD: 0.001,
+        gasPrice: fallbackGasPrice,
+        adjustmentReason: '使用默认费率'
+      };
+    }
   }
 }

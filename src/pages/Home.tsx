@@ -24,6 +24,9 @@ export default function Home() {
               <Link to="/explorer" className="text-gray-600 hover:text-blue-600 font-medium transition-colors">
                 Explorer
               </Link>
+              <Link to="/wallet" className="text-gray-600 hover:text-blue-600 font-medium transition-colors">
+                Wallet
+              </Link>
               <a href="#features" className="text-gray-600 hover:text-blue-600 font-medium transition-colors">
                 Features
               </a>

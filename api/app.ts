@@ -15,6 +15,8 @@ import authRoutes from './routes/auth.js'
 import explorerRoutes from './explorer/routes.js'
 import validatorRoutes from './validators/routes.js'
 import transactionRoutes from './transactions/routes.js'
+import walletRoutes from './wallet/routes.js'
+import blockchainRoutes from './blockchain/routes.js'
 import { SECURITY_VALIDATION, PERFORMANCE_CONFIG, SEQUENCER_CONFIG, ADAPTIVE_BATCH_CONFIG } from '../shared/constants/blockchain.js'
 import { adaptiveBatchController } from '../shared/utils/adaptive-batch.js'
 import { blockchainInstance } from '../shared/blockchain-instance.js'
@@ -187,9 +189,11 @@ try {
  * API Routes
  */
 app.use('/api/auth', authRoutes)
-app.use('/api', explorerRoutes)
+app.use('/api/explorer', explorerRoutes)
 app.use('/api/validators', validatorRoutes)
 app.use('/api/transactions', transactionRoutes)
+app.use('/api/wallet', walletRoutes)
+app.use('/api/blockchain', blockchainRoutes)
 
 // 自适应限流状态查询（仅用于调试/监控）
 app.get('/api/limits/adaptive', (req: Request, res: Response) => {
