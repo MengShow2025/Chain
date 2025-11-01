@@ -53,6 +53,52 @@ export const PERFORMANCE_CONFIG = {
   MAX_TRANSACTIONS_PER_BLOCK: 10000, // 每个区块最大交易数
 } as const;
 
+// 安全与验证配置（分层验证与挑战窗口）
+export const SECURITY_VALIDATION = {
+  // 安全模式：'perf_eval' | 'balanced' | 'strict'
+  SECURITY_MODE: 'strict',
+  // 挑战窗口（秒），用于批次承诺可被质疑的时间段
+  CHALLENGE_WINDOW: 2,
+  // 分层验证开关（L0-L3）
+  LAYERED_VALIDATION: {
+    L0_COMMIT: true,
+    L1_DA_CHECK: true,
+    L2_FAST_REPLAY: true,
+    L3_DEEP_VALIDATION: true,
+  },
+  // 不变式与公平性检查
+  INVARIANTS: {
+    ENABLE_FAIRNESS_CHECKER: true,
+    ENABLE_DETERMINISTIC_REPLAY: true,
+    ENABLE_DUPLICATE_ORDER_GUARD: true,
+  },
+  // 执行配方版本（用于批次承诺的可重放性）
+  RECIPE_FORMAT_VERSION: 1,
+} as const;
+
+// 排序器 / 匹配引擎配置（微批与门限见证）
+export const SEQUENCER_CONFIG = {
+  MICROBATCH_INTERVAL_MS: 100, // 微批间隔 (毫秒)
+  MAX_ORDERS_PER_BATCH: 250, // 每微批最大订单数
+  BATCH_COMMIT_FIELDS: {
+    includeLiquidityMetaRoot: true,
+    includeFeeReceiptsRoot: true,
+    includeDistributionPlanRoot: true,
+    includeNextStateRoot: true,
+  },
+  WITNESS_THRESHOLD: 3, // 门限见证签名数量（例如 3-of-5）
+  MAX_PENDING_BATCHES: 50, // 最大挂起批次数量
+} as const;
+
+// 数据可用性（DA）配置
+export const DA_CONFIG = {
+  BACKEND: 'CAS', // CAS: Content-Addressable Storage（如 IPFS/自研）
+  REPLICAS: 5, // 副本数量
+  RETENTION_DAYS: 7, // 最短保留期（天）
+  AUDIT_LOG_ENABLED: true, // 是否生成可审计日志
+  MAX_CHUNK_SIZE: 1024 * 256, // 单数据块最大大小（256KB）
+} as const;
+
 // 代币经济学
 export const TOKEN_CONFIG = {
   TOTAL_SUPPLY: BigInt('1000000000000000000000000000'), // 总供应量 (10亿 TTN)
@@ -83,7 +129,38 @@ export const ZERO_GAS_CONFIG = {
   // 每日交易量限额（用于批量免气费）
   DAILY_VOLUME_LIMIT: BigInt('10000000000000000000'), // 10 TTN
   // 免气费白名单交易所地址
-  AUTHORIZED_EXCHANGES: [] as string[],
+  AUTHORIZED_EXCHANGES: [
+    // 测试用授权交易所地址（本地开发与压测）
+    '0x1111111111111111111111111111111111111111',
+  ] as string[],
+} as const;
+
+// 自适应批量阈值配置（用于零gas批量形成的动态门限）
+export const ADAPTIVE_BATCH_CONFIG = {
+  ENABLED: true, // 开启自适应批量阈值
+  WINDOW_MS: 1000, // 调整窗口（毫秒）
+  // 基准阈值取自 ZERO_GAS_CONFIG
+  BASE_SIZE_THRESHOLD: ZERO_GAS_CONFIG.BATCH_SIZE_THRESHOLD,
+  BASE_VOLUME_THRESHOLD: ZERO_GAS_CONFIG.BATCH_VOLUME_THRESHOLD,
+  // 动态范围（在高压力时趋向于 MIN，在低压力时趋向于 MAX）
+  MIN_SIZE_THRESHOLD: 20,
+  MAX_SIZE_THRESHOLD: ZERO_GAS_CONFIG.BATCH_SIZE_THRESHOLD,
+  MIN_VOLUME_THRESHOLD: BigInt('200000000000000000'), // 0.2 TTN
+  MAX_VOLUME_THRESHOLD: ZERO_GAS_CONFIG.BATCH_VOLUME_THRESHOLD,
+  // 调整速率（用于平滑，0-1，越大响应越快）
+  ADJUST_RATE: 0.6,
+} as const;
+
+// 免气费白名单与限额（扩展字段）
+export const ZERO_GAS_WHITELIST = {
+  USERS: [] as string[], // 用户地址白名单
+  CONTRACTS: [] as string[], // 合约地址白名单
+} as const;
+
+export const ZERO_GAS_LIMITS = {
+  MAX_SPONSORED_GAS_PER_TX: BigInt('800000'), // 单笔最大赞助Gas
+  MAX_SPONSORED_GAS_PER_DAY: BigInt('50000000'), // 每地址每日赞助Gas上限
+  MAX_SPONSORED_TX_PER_DAY: 200, // 每地址每日赞助交易上限
 } as const;
 
 // 流动性共享配置
@@ -96,6 +173,28 @@ export const LIQUIDITY_CONFIG = {
     LIQUIDITY_PROVIDER: 0.2, // 流动性提供者 20%
     PLATFORM: 0.1, // 平台 10%
   },
+} as const;
+
+// 共享流动性分层费用（V2：LP 40%，交易者50%，平台10%）
+export const FEE_SPLIT_V2 = {
+  LP: 0.4, // 流动性提供者
+  TRADERS: {
+    MAKER: 0.3,
+    TAKER: 0.2,
+  },
+  PLATFORM: {
+    VALIDATOR_REWARDS: 0.05,
+    TREASURY_AND_OBSERVERS: 0.05,
+  },
+} as const;
+
+// 交易对注册表（占位）
+export const PAIR_REGISTRY = {
+  pairs: [
+    // 示例：统一的 PairID 约定
+    { pairId: 'TTN/ttUSD', base: 'TTN', quote: 'ttUSD', decimals: 18 },
+  ],
+  immutableIds: true, // PairID 一经发布不可变更
 } as const;
 
 // 验证节点状态
@@ -144,6 +243,11 @@ export const API_ENDPOINTS = {
   LIQUIDITY_POOLS: '/api/v1/liquidity/pools',
   ORDER_BOOK: '/api/v1/liquidity/orderbook',
   TRADING_PAIRS: '/api/v1/liquidity/pairs',
+
+  // 批次承诺与免气费
+  BATCH_COMMIT: '/api/v1/offchain/batch-commit',
+  BATCH_STATUS: '/api/v1/offchain/batch/:id',
+  GAS_SPONSOR: '/api/v1/gas/sponsor',
 } as const;
 
 // 错误代码

@@ -1,5 +1,6 @@
 import { Transaction, ExchangeBatch } from '../../shared/types/blockchain.js';
 import { PERFORMANCE_CONFIG, ZERO_GAS_CONFIG, ERROR_CODES } from '../../shared/constants/blockchain.js';
+import { adaptiveBatchController } from '../../shared/utils/adaptive-batch.js';
 
 /**
  * 高性能交易池
@@ -144,9 +145,13 @@ export class TransactionPool {
     batch.totalTransactions++;
     batch.totalVolume += tx.value;
     
-    // 检查是否达到批量处理阈值
-    if (batch.transactions.length >= ZERO_GAS_CONFIG.BATCH_SIZE_THRESHOLD ||
-        batch.totalVolume >= ZERO_GAS_CONFIG.BATCH_VOLUME_THRESHOLD) {
+    // 检查是否达到批量处理阈值（自适应）
+    const pendingTransactionsCount = this.pendingTransactions.size + this.zeroGasTransactions.size;
+    const pendingBatchesCount = Array.from(this.exchangeBatches.values()).filter(b => b.status === 'pending').length;
+    const { sizeThreshold, volumeThreshold } = adaptiveBatchController.update(pendingTransactionsCount, pendingBatchesCount);
+
+    if (batch.transactions.length >= sizeThreshold ||
+        batch.totalVolume >= volumeThreshold) {
       
       // 标记批量为处理状态
       batch.status = 'processing';

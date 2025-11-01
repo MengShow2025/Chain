@@ -92,3 +92,25 @@ keystore/
 *.pem
 wallet.dat
 genesis-wallets.json
+
+# Additional security
+config/secrets/
+*.secret
+*.private
+private-keys/
+test-keys/
+.env.*
+!.env.example
+
+# Database and data files
+*.db
+*.sqlite
+*.sqlite3
+data/cas/
+data/blockchain/
+
+# Temporary and test files
+temp/
+tmp/
+test-results/
+*.test.log

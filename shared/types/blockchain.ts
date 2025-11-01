@@ -348,3 +348,48 @@ export interface ValidatorTransition {
   stakeReleased: bigint;
   penaltyApplied: bigint;
 }
+
+// 批次承诺与验证相关类型（链下撮合 → 链上校验）
+export interface BatchCommit {
+  // 元信息
+  batchId: string;
+  producerId?: string;
+  timestamp?: number;
+  prevStateRoot?: string;
+
+  // 数据根（Merkle commitments）
+  ordersRoot?: string;
+  matchesRoot?: string;
+  cancellationsRoot?: string;
+  balanceDiffsRoot?: string;
+  auditLogRoot?: string;
+
+  // 流动性与费用相关根
+  liquidityMetaRoot?: string;
+  feeReceiptsRoot?: string;
+  distributionPlanRoot?: string;
+  gasCostRoot?: string;
+  sponsorAccountsRoot?: string;
+
+  // 状态根
+  nextStateRoot?: string;
+
+  // 数据可用性
+  cid?: string; // 内容地址（IPFS/Blob 等）
+
+  // 见证与签名
+  producerSig?: string;
+  witnessSigs?: string[]; // 简化：阈值校验
+
+  // 执行配方版本
+  recipeVersion?: number;
+}
+
+export interface BatchStatus {
+  batchId: string;
+  status: 'received' | 'validated' | 'invalid' | 'processing' | 'committed' | 'failed';
+  validationErrors?: string[];
+  witnessesCollected?: number;
+  nextStateRoot?: string;
+  timestamp: number;
+}

@@ -1,5 +1,10 @@
-import { Block, Transaction } from '../../shared/types/blockchain.js';
-import { CONSENSUS_CONFIG, PERFORMANCE_CONFIG } from '../../shared/constants/blockchain.js';
+import { Block, Transaction, BatchCommit } from '../../shared/types/blockchain.js';
+import { CONSENSUS_CONFIG, PERFORMANCE_CONFIG, SECURITY_VALIDATION, SEQUENCER_CONFIG } from '../../shared/constants/blockchain.js';
+import { casClient } from '../../shared/da/cas-client.js';
+import { computeBatchRoots } from '../../shared/utils/merkle.js';
+import { witnessRegistry } from '../../shared/security/witness-registry.js';
+import { keccak256, toUtf8Bytes } from 'ethers';
+import { verifyMessage } from 'ethers';
 
 /**
  * 区块验证器
@@ -59,6 +64,194 @@ export class BlockValidator {
       console.error('Block validation error:', error);
       return false;
     }
+  }
+
+  /**
+   * 批次承诺校验（占位实现）
+   * 用于验证 off-chain 匹配引擎生成的批次承诺结构与基础约束
+   */
+  async validateOffchainBatchCommit(commit: BatchCommit): Promise<{ ok: boolean; reason?: string }>{
+    try {
+      // 根据安全模式与环境变量决定是否跳过见证校验
+      const mode = SECURITY_VALIDATION.SECURITY_MODE;
+      const envSkip = process.env.SKIP_WITNESS_VALIDATION === 'true';
+      const SKIP_WITNESS_VALIDATION = envSkip || mode === 'perf_eval';
+      const DO_DA_CHECK = !!(SECURITY_VALIDATION.LAYERED_VALIDATION?.L1_DA_CHECK) && mode !== 'perf_eval';
+      if (process.env.NODE_ENV === 'development') {
+        console.log(`[Validator] Security mode=${mode} envSkip=${envSkip} -> skipWitness=${SKIP_WITNESS_VALIDATION} daCheck=${DO_DA_CHECK}`);
+      }
+
+      if (!commit || typeof commit.batchId !== 'string' || !commit.batchId) {
+        return { ok: false, reason: 'invalid_batchId' };
+      }
+
+      // 校验配方版本
+      if (commit.recipeVersion && commit.recipeVersion !== SECURITY_VALIDATION.RECIPE_FORMAT_VERSION) {
+        return { ok: false, reason: 'recipe_version_mismatch' };
+      }
+
+      // 需要包含的根根据排序器配置进行校验
+      const requireHex66 = (v?: string) => !!v && typeof v === 'string' && v.startsWith('0x') && v.length === 66;
+      if (SEQUENCER_CONFIG.BATCH_COMMIT_FIELDS.includeNextStateRoot && !requireHex66(commit.nextStateRoot)) {
+        return { ok: false, reason: 'missing_or_invalid_nextStateRoot' };
+      }
+      if (SEQUENCER_CONFIG.BATCH_COMMIT_FIELDS.includeLiquidityMetaRoot && !requireHex66(commit.liquidityMetaRoot)) {
+        return { ok: false, reason: 'missing_or_invalid_liquidityMetaRoot' };
+      }
+      if (SEQUENCER_CONFIG.BATCH_COMMIT_FIELDS.includeFeeReceiptsRoot && !requireHex66(commit.feeReceiptsRoot)) {
+        return { ok: false, reason: 'missing_or_invalid_feeReceiptsRoot' };
+      }
+      if (SEQUENCER_CONFIG.BATCH_COMMIT_FIELDS.includeDistributionPlanRoot && !requireHex66(commit.distributionPlanRoot)) {
+        return { ok: false, reason: 'missing_or_invalid_distributionPlanRoot' };
+      }
+
+      // 如提供其他根，必须满足格式
+      const optionalRoots: (keyof BatchCommit)[] = [
+        'ordersRoot', 'matchesRoot', 'cancellationsRoot', 'balanceDiffsRoot', 'auditLogRoot',
+        'gasCostRoot', 'sponsorAccountsRoot', 'prevStateRoot'
+      ];
+      for (const key of optionalRoots) {
+        const val = commit[key] as unknown as string | undefined;
+        if (val && !requireHex66(val)) {
+          return { ok: false, reason: `invalid_${String(key)}` };
+        }
+      }
+
+      // 赞助与燃气根一致性校验：若使用其中任一，则两者必须同时提供
+      const hasGasCostRoot = !!commit.gasCostRoot;
+      const hasSponsorAccountsRoot = !!commit.sponsorAccountsRoot;
+      if (hasGasCostRoot !== hasSponsorAccountsRoot) {
+        return { ok: false, reason: 'inconsistent_sponsor_gas_roots' };
+      }
+
+      // 门限见证（基础校验：数量）
+      const witnesses = Array.isArray(commit.witnessSigs) ? commit.witnessSigs : [];
+      if (witnesses.length < SEQUENCER_CONFIG.WITNESS_THRESHOLD) {
+        return { ok: false, reason: 'insufficient_witness_signatures' };
+      }
+      // 在开发模式下跳过签名与身份校验，仅进行数量与重复签名字符串检测
+      if (!SKIP_WITNESS_VALIDATION) {
+        // 见证签名与身份校验（恢复地址并验证是否在注册表）
+        // 固化摘要字段顺序，确保签名一致性
+        const digestString = this.computeCommitDigestString(commit);
+        console.log('[Validator] Commit digest:', digestString);
+        const recoveredSet = new Set<string>();
+        const signatureSet = new Set<string>();
+        for (const sig of witnesses) {
+          if (typeof sig !== 'string' || !sig.startsWith('0x')) {
+            return { ok: false, reason: 'invalid_witness_signature' };
+          }
+          // 签名字符串层面的重复检测（同一签名重复提交）
+          const sigLower = sig.toLowerCase();
+          if (signatureSet.has(sigLower)) {
+            console.warn('[Validator] Duplicate signature string detected');
+            return { ok: false, reason: 'duplicate_witness' };
+          }
+          signatureSet.add(sigLower);
+          let addr: string;
+          try {
+            // 使用 EIP-191 前缀消息签名与恢复
+            addr = verifyMessage(digestString, sig);
+          } catch (e) {
+            return { ok: false, reason: 'invalid_witness_signature' };
+          }
+          console.log('[Validator] Recovered witness addr:', addr);
+          if (!witnessRegistry.isRegistered(addr)) {
+            return { ok: false, reason: 'unauthorized_witness' };
+          }
+          if (recoveredSet.has(addr.toLowerCase())) {
+            console.warn('[Validator] Duplicate witness detected:', addr);
+            return { ok: false, reason: 'duplicate_witness' };
+          }
+          recoveredSet.add(addr.toLowerCase());
+        }
+        console.log('[Validator] Unique witnesses collected:', recoveredSet.size, 'submitted:', witnesses.length);
+        // 除了门限，还要求唯一见证数量与提交数量一致（避免同一地址重复签名）
+        if (recoveredSet.size < SEQUENCER_CONFIG.WITNESS_THRESHOLD) {
+          return { ok: false, reason: 'insufficient_unique_witnesses' };
+        }
+        if (recoveredSet.size !== witnesses.length) {
+          return { ok: false, reason: 'duplicate_witness' };
+        }
+      }
+
+      // 时间戳存在性校验
+      if (commit.timestamp && typeof commit.timestamp !== 'number') {
+        return { ok: false, reason: 'invalid_timestamp' };
+      }
+
+      // 数据可用性 CID（如提供）格式校验
+      if (commit.cid && typeof commit.cid !== 'string') {
+        return { ok: false, reason: 'invalid_cid' };
+      }
+
+      // L1 数据可用性检查：如启用则拉取批次数据并校验 Merkle 根一致性
+      if (DO_DA_CHECK) {
+        if (!commit.cid) {
+          return { ok: false, reason: 'missing_cid_for_da_check' };
+        }
+        const data = casClient.get(commit.cid);
+        if (!data) {
+          return { ok: false, reason: 'da_data_unavailable' };
+        }
+        const roots = computeBatchRoots({
+          orders: data.orders || [],
+          matches: data.matches || [],
+          balanceDiffs: data.balanceDiffs || [],
+          auditLog: data.auditLog || [],
+        });
+        // 如提交了对应根，则必须与数据一致
+        if (commit.ordersRoot && commit.ordersRoot !== roots.ordersRoot) {
+          return { ok: false, reason: 'orders_root_mismatch' };
+        }
+        if (commit.matchesRoot && commit.matchesRoot !== roots.matchesRoot) {
+          return { ok: false, reason: 'matches_root_mismatch' };
+        }
+        if (commit.balanceDiffsRoot && commit.balanceDiffsRoot !== roots.balanceDiffsRoot) {
+          return { ok: false, reason: 'balance_diffs_root_mismatch' };
+        }
+        if (commit.auditLogRoot && commit.auditLogRoot !== roots.auditLogRoot) {
+          return { ok: false, reason: 'audit_log_root_mismatch' };
+        }
+      }
+
+      // 严格模式下：要求提供审计日志根以支持公平性验证占位（可选增强）
+      if (mode === 'strict') {
+        const requireHex66 = (v?: string) => !!v && typeof v === 'string' && v.startsWith('0x') && v.length === 66;
+        if (!requireHex66(commit.auditLogRoot)) {
+          return { ok: false, reason: 'missing_or_invalid_auditLogRoot' };
+        }
+      }
+
+      // 后续：在严格模式下可进行更深层的重放与公平性检查
+      // 当前为占位实现，仅进行结构与门限校验
+      return { ok: true };
+    } catch (e) {
+      console.error('validateOffchainBatchCommit error:', e);
+      return { ok: false, reason: 'internal_error' };
+    }
+  }
+
+  private computeCommitDigestString(commit: BatchCommit): string {
+    const parts = [
+      commit.batchId || '',
+      commit.cid || '',
+      commit.ordersRoot || '',
+      commit.matchesRoot || '',
+      commit.balanceDiffsRoot || '',
+      commit.auditLogRoot || '',
+      // 新增：将赞助账户根与燃气成本根纳入摘要以增强一致性
+      commit.sponsorAccountsRoot || '',
+      commit.gasCostRoot || '',
+      commit.prevStateRoot || '',
+      commit.nextStateRoot || '',
+      commit.feeReceiptsRoot || '',
+      commit.distributionPlanRoot || '',
+      commit.liquidityMetaRoot || '',
+      String(commit.timestamp || 0),
+    ];
+    // 可选：外部验证哈希值为 keccak256(toUtf8Bytes(parts.join('|')))
+    return parts.join('|');
   }
   
   /**

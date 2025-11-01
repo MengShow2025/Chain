@@ -6,7 +6,7 @@
 */
 
 const DEFAULT_NODES = [3101, 3102, 3103, 3104].map((p) => `http://localhost:${p}`);
-const DEFAULT_STAGES = [20, 40, 80]; // concurrency levels (tuned to respect anti-spam)
+const DEFAULT_STAGES = [20, 40, 80]; // concurrency levels
 const DEFAULT_DURATION_SEC = 15; // per stage
 
 function randomHex(len) {
@@ -17,8 +17,10 @@ function randomHex(len) {
 }
 
 function makeAddress(prefixHex, index) {
-  const base = (prefixHex + index.toString(16)).slice(0, 40);
-  return '0x' + base.padEnd(40, 'a');
+  // 生成唯一有效地址：在prefix中插入index的十六进制，保证40位长度
+  const idxHex = index.toString(16);
+  const base = (prefixHex.slice(0, Math.max(0, 40 - idxHex.length)) + idxHex).padEnd(40, 'a');
+  return '0x' + base;
 }
 
 function percentile(arr, p) {
@@ -66,6 +68,9 @@ async function runStage({ nodes, concurrency, durationSec, accountCount }) {
       gas: Math.random() < 0.2 ? '22000' : '21000',
       gasPrice: String(gasPriceBase + gasPriceJitter),
       value: String(Math.floor(Math.random() * 1000)),
+      data: '0x',
+      isZeroGas: false,
+      timestamp: Date.now(),
     };
 
     const node = nextNode();
@@ -136,7 +141,11 @@ async function runStage({ nodes, concurrency, durationSec, accountCount }) {
 async function main() {
   const args = process.argv.slice(2);
   const nodes = (process.env.NODES ? process.env.NODES.split(',').map(s => s.trim()).filter(Boolean) : DEFAULT_NODES);
-  const stages = DEFAULT_STAGES;
+  const stages = (process.env.STAGES
+    ? process.env.STAGES.split(',')
+        .map((s) => Number(s.trim()))
+        .filter((n) => Number.isFinite(n) && n > 0)
+    : DEFAULT_STAGES);
   const durationSec = Number(process.env.DURATION_SEC || DEFAULT_DURATION_SEC);
   const accountCount = Number(process.env.ACCOUNT_COUNT || 5000);
 

@@ -8,6 +8,8 @@ import { BlockValidator } from './block-validator.js';
 import { ZeroGasEngine } from './zero-gas-engine.js';
 import { HighPerformanceProcessor } from './high-performance-processor.js';
 import { calculateBlockReward } from '../../shared/utils/rewards.ts';
+import { computeSponsorAccountsRoot } from '../../shared/utils/merkle.js';
+import { SponsorPoolService } from './sponsor-pool.js';
 
 /**
  * TitanChain主链核心
@@ -21,6 +23,7 @@ export class TitanChain {
   private blockValidator: BlockValidator;
   private zeroGasEngine: ZeroGasEngine;
   private performanceProcessor: HighPerformanceProcessor;
+  private microBatchScheduler?: any;
   
   private blockchain: Block[] = [];
   private currentBlock: Block | null = null;
@@ -53,6 +56,20 @@ export class TitanChain {
     this.blockValidator = new BlockValidator();
     this.zeroGasEngine = new ZeroGasEngine();
     this.performanceProcessor = new HighPerformanceProcessor(this.transactionPool);
+
+    // 挂载微批调度器（按需启用）
+    try {
+      const { MicroBatchScheduler } = require('./micro-batch-scheduler.js');
+      const enableScheduler = (process.env.ENABLE_MICROBATCH ?? 'true').toLowerCase() !== 'false';
+      if (enableScheduler) {
+        this.microBatchScheduler = new MicroBatchScheduler(this.transactionPool, this.performanceProcessor);
+        console.log('MicroBatchScheduler initialized');
+      } else {
+        console.log('MicroBatchScheduler disabled by ENV ENABLE_MICROBATCH=false');
+      }
+    } catch (e) {
+      console.warn('MicroBatchScheduler not available:', e?.message || e);
+    }
     
     console.log('TitanChain initialized successfully');
   }
@@ -79,6 +96,11 @@ export class TitanChain {
       } else {
         console.log('Block production disabled by ENV ENABLE_BLOCK_PRODUCTION=false');
       }
+
+      // 启动微批调度器
+      if (this.microBatchScheduler) {
+        this.microBatchScheduler.start();
+      }
       
       // 启动验证节点选举
       this.startValidatorElection();
@@ -103,6 +125,13 @@ export class TitanChain {
     if (this.blockProductionInterval) {
       clearInterval(this.blockProductionInterval);
       this.blockProductionInterval = null;
+    }
+
+    // 停止微批调度器
+    if (this.microBatchScheduler) {
+      try {
+        this.microBatchScheduler.stop();
+      } catch {}
     }
     
     console.log('TitanChain network stopped');
@@ -548,6 +577,15 @@ export class TitanChain {
   }
   
   /**
+   * 获取交易池安全统计（黑名单、限速、可疑模式、拒绝计数）
+   */
+  getTransactionPoolSecurityStats() {
+    // 暴露交易池内部的安全统计，用于API查询与监控
+    return (this.transactionPool as any).getSecurityStats?.()
+      ?? { blacklistedAddresses: 0, rateLimitedAddresses: 0, suspiciousPatterns: 0, rejectedTransactions: 0 };
+  }
+  
+  /**
    * 注册候补验证节点
    */
   async registerValidatorCandidate(candidate: any): Promise<boolean> {
@@ -686,6 +724,26 @@ export class TitanChain {
   getQueueStatus() {
     return this.performanceProcessor.getQueueStatus();
   }
+
+  /**
+   * 获取微批调度器状态
+   */
+  getMicroBatchStatus() {
+    try {
+      if (this.microBatchScheduler && typeof this.microBatchScheduler.getStatus === 'function') {
+        return this.microBatchScheduler.getStatus();
+      }
+    } catch (e) {
+      console.warn('Failed to get microBatch status:', e?.message || e);
+    }
+    return {
+      running: false,
+      intervalMs: 0,
+      maxOrdersPerBatch: 0,
+      maxPendingBatches: 0,
+      pendingBatchCount: 0
+    };
+  }
   
   /**
    * 批量提交交易
@@ -746,6 +804,14 @@ export class TitanChain {
   getDailyLimitUsage(exchangeId: string) {
     return this.zeroGasEngine.getDailyLimitUsage(exchangeId);
   }
+
+  /**
+   * 获取赞助账户根（基于当前赞助池快照）
+   */
+  getSponsorAccountsRoot(): string {
+    const snapshot = SponsorPoolService.snapshot();
+    return computeSponsorAccountsRoot(snapshot);
+  }
   
   /**
    * 估算gas费用节省
@@ -774,7 +840,8 @@ export class TitanChain {
       zeroGasStats: this.getZeroGasStats(),
       performanceStats: this.getPerformanceStats(),
       performanceMetrics: this.getPerformanceMetrics(),
-      queueStatus: this.getQueueStatus()
+      queueStatus: this.getQueueStatus(),
+      microBatchStatus: this.getMicroBatchStatus()
     };
   }
 }

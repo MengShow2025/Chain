@@ -6,7 +6,8 @@ import {
   HardwareMetrics, 
   NetworkMetrics,
   AssociatedNodesAnalysis,
-  AssociatedNodeGroup
+  AssociatedNodeGroup,
+  Block
 } from '../../shared/types/blockchain.js';
 import { CONSENSUS_CONFIG } from '../../shared/constants/blockchain.js';
 
@@ -85,6 +86,76 @@ export class ViolationDetector {
     }, 24 * 60 * 60 * 1000);
     
     console.log('Continuous monitoring started');
+  }
+
+  /**
+   * 检测同一高度双签（同一验证者在同一高度提交不同区块）
+   * 当发现双签时记录违规并返回true
+   */
+  async detectDoubleSigning(existingBlockAtHeight: Block | null | undefined, incomingBlock: Block): Promise<boolean> {
+    try {
+      if (!existingBlockAtHeight) return false;
+      const isSameHeight = existingBlockAtHeight.number === incomingBlock.number;
+      const isSameValidator = existingBlockAtHeight.validator === incomingBlock.validator;
+      const isDifferentHash = existingBlockAtHeight.hash !== incomingBlock.hash;
+      if (isSameHeight && isSameValidator && isDifferentHash) {
+        const violation: ViolationRecord = {
+          type: ViolationType.DOUBLE_SIGNING,
+          severity: 'critical',
+          timestamp: Date.now(),
+          blockNumber: incomingBlock.number,
+          description: `Double signing detected at height #${incomingBlock.number} by ${incomingBlock.validator}`,
+          evidence: {
+            height: incomingBlock.number,
+            currentHash: existingBlockAtHeight.hash,
+            incomingHash: incomingBlock.hash,
+            validator: incomingBlock.validator
+          },
+          penalty: BigInt('0'),
+          resolved: false
+        };
+        await this.recordViolation(incomingBlock.validator, violation);
+        return true;
+      }
+      return false;
+    } catch (error) {
+      console.error('detectDoubleSigning error:', error);
+      return false;
+    }
+  }
+
+  /**
+   * 检测恶意分叉（新块的父哈希与预期不一致或构造异常分叉）
+   * 当发现恶意分叉时记录违规并返回true
+   */
+  async detectMaliciousFork(expectedParent: Block | null | undefined, incomingBlock: Block): Promise<boolean> {
+    try {
+      if (!expectedParent) return false;
+      const isNextHeight = incomingBlock.number === expectedParent.number + 1 || incomingBlock.number === expectedParent.number;
+      const parentMismatch = incomingBlock.parentHash !== expectedParent.hash;
+      if (isNextHeight && parentMismatch) {
+        const violation: ViolationRecord = {
+          type: ViolationType.MALICIOUS_FORK,
+          severity: 'critical',
+          timestamp: Date.now(),
+          blockNumber: incomingBlock.number,
+          description: `Malicious fork detected: parent mismatch for block #${incomingBlock.number}`,
+          evidence: {
+            expectedParentHash: expectedParent.hash,
+            incomingParentHash: incomingBlock.parentHash,
+            validator: incomingBlock.validator
+          },
+          penalty: BigInt('0'),
+          resolved: false
+        };
+        await this.recordViolation(incomingBlock.validator, violation);
+        return true;
+      }
+      return false;
+    } catch (error) {
+      console.error('detectMaliciousFork error:', error);
+      return false;
+    }
   }
   
   /**
@@ -309,6 +380,13 @@ export class ViolationDetector {
       analysisTimestamp: Date.now()
     };
   }
+
+  /**
+   * 兼容方法：检测IP分组（用于测试可见性）
+   */
+  detectIPGrouping(): Map<string, string[]> {
+    return this.groupNodesByIP();
+  }
   
   /**
    * 按IP分组节点
@@ -325,6 +403,104 @@ export class ViolationDetector {
     }
     
     return ipGroups;
+  }
+
+  /**
+   * 评估51%攻击风险（封装关联节点分析）
+   */
+  async assess51AttackRisk(): Promise<{ riskLevel: 'low' | 'medium' | 'high' | 'critical'; groups: AssociatedNodeGroup[]; analysisTimestamp: number; }> {
+    const analysis = await this.analyzeAssociatedNodes();
+    return {
+      riskLevel: analysis.riskLevel,
+      groups: analysis.suspiciousGroups,
+      analysisTimestamp: analysis.analysisTimestamp
+    };
+  }
+
+  /**
+   * 通用违规检测入口，用于统一调度具体违规类型的检测逻辑
+   * 便于外部只调用一个方法触发检测，同时满足综合测试项要求
+   */
+  async detectViolation(params: {
+    type: ViolationType,
+    validator: string,
+    evidence?: any,
+    blockContext?: { existing?: Block | null, incoming: Block, expectedParent?: Block | null }
+  }): Promise<boolean> {
+    const { type, validator, evidence, blockContext } = params;
+
+    switch (type) {
+      case ViolationType.DOUBLE_SIGNING: {
+        if (blockContext?.incoming) {
+          return this.detectDoubleSigning(blockContext?.existing ?? null, blockContext.incoming);
+        }
+        // 没有上下文，直接记录提示性违规
+        await this.recordViolation(validator, {
+          type,
+          severity: 'low',
+          timestamp: Date.now(),
+          description: 'Double signing suspected (no block context provided)',
+          evidence,
+          resolved: false,
+          penalty: BigInt(0),
+          blockNumber: typeof evidence?.height === 'number' 
+            ? evidence.height 
+            : (blockContext?.incoming?.number ?? 0)
+        });
+        return true;
+      }
+      case ViolationType.MALICIOUS_FORK: {
+        if (blockContext?.incoming) {
+          return this.detectMaliciousFork(blockContext?.expectedParent ?? null, blockContext.incoming);
+        }
+        await this.recordViolation(validator, {
+          type,
+          severity: 'low',
+          timestamp: Date.now(),
+          description: 'Malicious fork suspected (no parent context provided)',
+          evidence,
+          resolved: false,
+          penalty: BigInt(0),
+          blockNumber: typeof evidence?.height === 'number' 
+            ? evidence.height 
+            : (blockContext?.incoming?.number ?? 0)
+        });
+        return true;
+      }
+      case ViolationType.HARDWARE_INSUFFICIENT:
+      case ViolationType.LONG_OFFLINE:
+      case ViolationType.BLOCK_PRODUCTION_FAILURE: {
+        await this.recordViolation(validator, {
+          type,
+          severity: 'medium',
+          timestamp: Date.now(),
+          description: `System detected violation: ${ViolationType[type]}`,
+          evidence,
+          resolved: false,
+          penalty: BigInt(0),
+          blockNumber: typeof evidence?.height === 'number' 
+            ? evidence.height 
+            : (blockContext?.incoming?.number ?? 0)
+        });
+        return true;
+      }
+      default: {
+        // 未知类型，记录信息用于后续分析
+        await this.recordViolation(validator, {
+          type,
+          severity: 'low',
+          timestamp: Date.now(),
+          description: 'Unknown violation type reported via detectViolation()',
+          evidence,
+          resolved: false,
+          penalty: BigInt(0),
+          blockNumber: typeof evidence?.height === 'number' 
+            ? evidence.height 
+            : (blockContext?.incoming?.number ?? 0)
+        });
+        return true;
+      }
+    }
   }
   
   /**

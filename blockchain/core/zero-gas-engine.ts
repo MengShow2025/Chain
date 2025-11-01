@@ -1,5 +1,7 @@
 import { Transaction, ExchangeBatch } from '../../shared/types/blockchain.js';
 import { ZERO_GAS_CONFIG, PERFORMANCE_CONFIG } from '../../shared/constants/blockchain.js';
+import { adaptiveBatchController } from '../../shared/utils/adaptive-batch.js';
+import { SponsorPoolService } from './sponsor-pool.js';
 
 /**
  * 0-gas费交易处理引擎
@@ -123,6 +125,16 @@ export class ZeroGasEngine {
     if (!this.checkDailyLimit(exchangeId, tx.value)) {
       return { success: false, reason: 'Daily limit exceeded' };
     }
+
+    // 赞助池扣费资格检查与扣费（按gas单位）
+    const sponsorCheck = SponsorPoolService.canSponsor(exchangeId, tx.gas);
+    if (!sponsorCheck.ok) {
+      return { success: false, reason: `Sponsor rejected: ${sponsorCheck.reason}` };
+    }
+    const sponsorDeduct = SponsorPoolService.deduct(exchangeId, tx.gas);
+    if (!sponsorDeduct.ok) {
+      return { success: false, reason: `Sponsor deduct failed: ${sponsorDeduct.reason}` };
+    }
     
     // 添加交易到批量
     batch.transactions.push(tx.hash);
@@ -132,9 +144,10 @@ export class ZeroGasEngine {
     // 更新每日使用量
     this.updateDailyUsage(exchangeId, tx.value);
     
-    // 检查是否达到批量处理阈值
-    if (batch.transactions.length >= ZERO_GAS_CONFIG.BATCH_SIZE_THRESHOLD ||
-        batch.totalVolume >= ZERO_GAS_CONFIG.BATCH_VOLUME_THRESHOLD) {
+    // 检查是否达到批量处理阈值（自适应）
+    const { sizeThreshold, volumeThreshold } = adaptiveBatchController.update(0, this.exchangeBatches.size);
+    if (batch.transactions.length >= sizeThreshold ||
+        batch.totalVolume >= volumeThreshold) {
       batch.status = 'ready';
       console.log(`Exchange batch ${batchId} is ready for processing`);
     }
@@ -182,6 +195,17 @@ export class ZeroGasEngine {
     const currentUsage = this.contractTierUsage.get(tier) || 0;
     if (currentUsage >= tierConfig.dailyLimit) {
       return { success: false, reason: `Tier ${tier} daily limit exceeded` };
+    }
+
+    // 赞助池扣费资格检查与扣费：按目标合约地址作为赞助账户
+    const sponsorAccount = tx.to;
+    const sponsorCheck = SponsorPoolService.canSponsor(sponsorAccount, tx.gas);
+    if (!sponsorCheck.ok) {
+      return { success: false, reason: `Sponsor rejected: ${sponsorCheck.reason}` };
+    }
+    const sponsorDeduct = SponsorPoolService.deduct(sponsorAccount, tx.gas);
+    if (!sponsorDeduct.ok) {
+      return { success: false, reason: `Sponsor deduct failed: ${sponsorDeduct.reason}` };
     }
     
     // 更新层级使用统计
@@ -425,6 +449,11 @@ export class ZeroGasEngine {
       if (!this.checkDailyLimit(exchangeId, tx.value)) {
         return { eligible: false, reason: 'Daily limit exceeded' };
       }
+      // 赞助池资格检查（按gas单位）
+      const sponsorCheck = SponsorPoolService.canSponsor(exchangeId, tx.gas);
+      if (!sponsorCheck.ok) {
+        return { eligible: false, reason: `Sponsor rejected: ${sponsorCheck.reason}` };
+      }
       
       return { eligible: true };
     }
@@ -444,6 +473,11 @@ export class ZeroGasEngine {
       const currentUsage = this.contractTierUsage.get(tier) || 0;
       if (currentUsage >= tierConfig.dailyLimit) {
         return { eligible: false, reason: 'Tier daily limit exceeded' };
+      }
+      // 赞助池资格检查：以合约地址作为赞助账户
+      const sponsorCheck = SponsorPoolService.canSponsor(tx.to, tx.gas);
+      if (!sponsorCheck.ok) {
+        return { eligible: false, reason: `Sponsor rejected: ${sponsorCheck.reason}` };
       }
       
       return { eligible: true };
