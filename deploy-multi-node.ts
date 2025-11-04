@@ -9,6 +9,7 @@
 import dotenv from 'dotenv';
 import path from 'path';
 import { SmartNodeLauncher } from './smart-node-launcher.js';
+import { promises as fs } from 'fs'; // file io for report / 文件IO用于报告 // 英文 /中文
 
 // Load environment variables / 加载环境变量 // 英文 /中文
 dotenv.config();
@@ -130,11 +131,43 @@ async function main() {
 
     // Summarize status / 汇总状态 // 英文 /中文
     console.log('\n📊 Deployment Summary / 部署汇总:');
-    for (let i = 0; i < launchers.length; i++) {
-      const status = launchers[i].getStatus();
+    const statuses = launchers.map((l) => l.getStatus());
+    for (let i = 0; i < statuses.length; i++) {
+      const s = statuses[i];
+      const shortHash = s.lastBlockHash ? s.lastBlockHash.slice(0, 12) : 'N/A';
       console.log(
-        `   #${i} ${status.nodeId} | running=${status.isRunning} | peers=${status.peerCount} | height=${status.blockHeight} | sync=${status.syncStatus}`
+        `   #${i} ${s.nodeId} | running=${s.isRunning} | peers=${s.peerCount} | height=${s.blockHeight} | hash=${shortHash} | sync=${s.syncStatus}`
       );
+    }
+
+    // Consistency check / 一致性检查 // 英文 /中文
+    const baseHeight = statuses[0]?.blockHeight ?? 0;
+    const baseHash = statuses[0]?.lastBlockHash ?? undefined;
+    const heightConsistency = statuses.every(s => s.blockHeight === baseHeight);
+    const hashConsistency = statuses.every(s => s.lastBlockHash === baseHash);
+
+    console.log('\n🧮 Consistency Report / 一致性报告:');
+    console.log(`   🔢 Height Consistent: ${heightConsistency} / 高度一致: ${heightConsistency}`);
+    console.log(`   🔑 Hash Consistent: ${hashConsistency} / 哈希一致: ${hashConsistency}`);
+
+    // Persist report to file for reliable verification / 将报告写入文件以可靠校验 // 英文 /中文
+    try {
+      const report = {
+        timestamp: new Date().toISOString(), // report time / 报告时间 // 英文 /中文
+        nodeCount: config.nodeCount, // 节点数量 // 英文 /中文
+        basePort: config.basePort, // 基础端口 // 英文 /中文
+        statuses, // 节点状态 // 英文 /中文
+        baseHeight, // 基准高度 // 英文 /中文
+        baseHash, // 基准哈希 // 英文 /中文
+        heightConsistency, // 高度一致性 // 英文 /中文
+        hashConsistency // 哈希一致性 // 英文 /中文
+      };
+      const reportPath = path.join(config.dataDirBase, 'consistency-report.json');
+      await fs.mkdir(config.dataDirBase, { recursive: true }); // ensure dir / 确保目录存在 // 英文 /中文
+      await fs.writeFile(reportPath, JSON.stringify(report, null, 2));
+      console.log(`📝 Consistency report saved to: ${reportPath} / 一致性报告已保存: ${reportPath}`);
+    } catch (e) {
+      console.error('⚠️ Failed to write consistency report / 写入一致性报告失败:', e);
     }
 
     console.log('\n✅ Multi-node deployment completed. Press Ctrl+C to stop. / 多节点部署完成，按Ctrl+C停止');

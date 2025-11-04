@@ -60,6 +60,7 @@ interface NodeStatus {
   peerCount: number;
   syncStatus: 'syncing' | 'synced' | 'error';
   lastUpdate: number;
+  lastBlockHash?: string; // last block hash / 最新区块哈希 // 英文 /中文
 }
 
 /**
@@ -116,7 +117,8 @@ class SmartNodeLauncher {
       blockHeight: 0,
       peerCount: 0,
       syncStatus: 'syncing',
-      lastUpdate: Date.now()
+      lastUpdate: Date.now(),
+      lastBlockHash: undefined // initialize without hash / 初始无哈希 // 英文 /中文
     };
 
     // Register global blockchain instance / 注册全局区块链实例
@@ -349,6 +351,7 @@ class SmartNodeLauncher {
       // Update node status / 更新节点状态
       this.nodeStatus.blockHeight = this.blockchain.getChain().length;
       this.nodeStatus.syncStatus = 'synced';
+      this.nodeStatus.lastBlockHash = this.blockchain.getLatestBlock()?.hash || undefined; // set genesis hash / 设置创世哈希 // 英文 /中文
 
       console.log('✅ New network initialized successfully / 新网络初始化成功');
       console.log(`🏛️  Genesis block created with hash: ${this.blockchain.getChain()[0]?.hash || 'N/A'}`);
@@ -414,10 +417,18 @@ class SmartNodeLauncher {
       // 设置当前链状态给同步协议 // 英文 /中文
       this.blockSync.setBlockchainState(this.blockchain.getChain(), this.blockchain.getLatestBlock());
 
-      // Create and start P2P node / 创建并启动P2P节点
-      // 将区块链与同步协议接入增强P2P节点 // 英文 /中文
-      this.p2pNode = new EnhancedP2PNode(this.blockchain, this.blockSync, p2pConfig);
-      await this.p2pNode.start();
+      // Create or reuse P2P node / 创建或复用P2P节点 // 英文 /中文
+      if (this.p2pNode) {
+        console.log('♻️ Reusing existing P2P node / 复用已存在的P2P节点');
+        // 如果尚未连接，尝试启动 / If not connected, try to start // 英文 /中文
+        if (!this.p2pNode.isConnected()) {
+          await this.p2pNode.start();
+        }
+      } else {
+        // 将区块链与同步协议接入增强P2P节点 // 英文 /中文
+        this.p2pNode = new EnhancedP2PNode(this.blockchain, this.blockSync, p2pConfig);
+        await this.p2pNode.start();
+      }
 
       // 触发一次同步尝试（如果启用了自动同步也会定期进行） // 英文 /中文
       try {
@@ -477,6 +488,7 @@ class SmartNodeLauncher {
       this.nodeStatus.blockHeight = this.blockchain.getChain().length;
       this.nodeStatus.peerCount = this.p2pNode?.getPeers().length || 0;
       this.nodeStatus.lastUpdate = Date.now();
+      this.nodeStatus.lastBlockHash = this.blockchain.getLatestBlock()?.hash || undefined; // update hash / 更新哈希 // 英文 /中文
 
       // Check if node is still syncing / 检查节点是否仍在同步
       if (this.nodeStatus.syncStatus === 'syncing') {
@@ -500,6 +512,8 @@ class SmartNodeLauncher {
     console.log(`   📊 Block Height: ${this.nodeStatus.blockHeight} / 区块高度: ${this.nodeStatus.blockHeight}`);
     console.log(`   👥 Peer Count: ${this.nodeStatus.peerCount} / 节点数量: ${this.nodeStatus.peerCount}`);
     console.log(`   🔄 Sync Status: ${this.nodeStatus.syncStatus} / 同步状态: ${this.nodeStatus.syncStatus}`);
+    const shortHash = this.nodeStatus.lastBlockHash ? this.nodeStatus.lastBlockHash.slice(0, 12) : 'N/A';
+    console.log(`   🔑 Last Block Hash: ${shortHash} / 最新区块哈希: ${shortHash}`);
     console.log(`   ⏰ Last Update: ${new Date(this.nodeStatus.lastUpdate).toISOString()}`);
   }
 
@@ -567,21 +581,72 @@ class SmartNodeLauncher {
       console.log(`📥 Syncing from peer: ${networkInfo.bestPeer} / 从节点同步: ${networkInfo.bestPeer}`);
       console.log(`📊 Target height: ${networkInfo.networkHeight} / 目标高度: ${networkInfo.networkHeight}`);
 
-      // This would implement actual block synchronization
-      // For now, simulate the process
-      const currentHeight = this.blockchain.getChain().length;
-      const targetHeight = networkInfo.networkHeight;
+      // Initialize BlockSyncProtocol if not present // 英文 /中文
+      if (!this.blockSync) {
+        const blockValidator = this.blockchain.getBlockValidator();
+        this.blockSync = new BlockSyncProtocol(blockValidator, {
+          maxBatchSize: 200,                // 批量大小 // 英文 /中文
+          syncTimeout: this.config.syncTimeout || 30000, // 同步超时 // 英文 /中文
+          maxRetries: this.config.maxRetries || 3,       // 最大重试 // 英文 /中文
+          conflictResolutionTimeout: 10000, // 冲突解决超时 // 英文 /中文
+          enableForkDetection: true,        // 启用分叉检测 // 英文 /中文
+          maxForkDepth: 10                  // 最大分叉深度 // 英文 /中文
+        });
+      }
 
-      if (targetHeight > currentHeight) {
-        console.log(`📈 Syncing ${targetHeight - currentHeight} blocks / 同步${targetHeight - currentHeight}个区块...`);
-        
-        // Simulate sync progress
-        for (let i = currentHeight; i < targetHeight; i++) {
-          await new Promise(resolve => setTimeout(resolve, 100)); // Simulate block processing
-          if (i % 10 === 0) {
-            console.log(`📊 Sync progress: ${i}/${targetHeight} blocks / 同步进度: ${i}/${targetHeight}个区块`);
-          }
+      // Keep BlockSyncProtocol in sync with local chain state // 英文 /中文
+      this.blockSync.setBlockchainState(this.blockchain.getChain(), this.blockchain.getLatestBlock());
+
+      // Prepare a minimal P2P node focused on syncing from best peer // 英文 /中文
+      if (!this.p2pNode) {
+        const p2pConfig = {
+          port: this.config.p2pPort,        // 使用配置端口 // 英文 /中文
+          host: '0.0.0.0',
+          bootnodes: [networkInfo.bestPeer], // 仅连接最佳节点 // 英文 /中文
+          enablePeerDiscovery: false,       // 同步阶段禁用发现以减少噪音 // 英文 /中文
+          enableAutoSync: true,             // 启用自动同步 // 英文 /中文
+          maxPeers: 5,                      // 同步阶段限制连接数 // 英文 /中文
+          syncInterval: 5000                // 同步检查间隔 // 英文 /中文
+        };
+
+        // Create and start P2P node with block sync protocol // 英文 /中文
+        this.p2pNode = new EnhancedP2PNode(this.blockchain, this.blockSync, p2pConfig);
+        await this.p2pNode.start();
+      }
+
+      // Manually trigger an initial sync attempt // 英文 /中文
+      try {
+        await this.p2pNode.triggerSync();
+      } catch (e) {
+        console.warn('Trigger sync failed, will rely on auto-sync / 触发同步失败，将依赖自动同步');
+      }
+
+      // Wait for synchronization with progress monitoring // 英文 /中文
+      const startHeight = this.blockchain.getChain().length;
+      const targetHeight = Math.max(networkInfo.networkHeight, startHeight);
+      const startTime = Date.now();
+      const timeout = this.config.syncTimeout || 30000;
+      let lastLoggedHeight = startHeight;
+
+      while (true) {
+        const stats = this.blockSync.getSyncStats();
+        const currentHeight = this.blockchain.getChain().length;
+
+        // Progress logging every 1s or when height increases // 英文 /中文
+        if (currentHeight > lastLoggedHeight) {
+          console.log(`📊 Sync progress / 同步进度: ${currentHeight}/${targetHeight} (status=${stats.status})`);
+          lastLoggedHeight = currentHeight;
         }
+
+        // Exit conditions // 英文 /中文
+        if (currentHeight >= targetHeight || stats.status === SyncStatus.SYNCHRONIZED) {
+          break;
+        }
+        if (Date.now() - startTime > timeout) {
+          throw new Error(`Sync timeout after ${timeout}ms / 同步超时${timeout}毫秒，当前高度${currentHeight}，目标高度${targetHeight}`);
+        }
+
+        await new Promise((r) => setTimeout(r, 500));
       }
 
       console.log('✅ Blockchain synchronization completed / 区块链同步完成');
@@ -723,4 +788,5 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   main().catch(console.error);
 }
 
-export { SmartNodeLauncher, NodeStartupConfig, NetworkDiscoveryResult, NodeStatus };
+export { SmartNodeLauncher };
+export type { NodeStartupConfig, NetworkDiscoveryResult, NodeStatus };
