@@ -1,31 +1,33 @@
-import express from 'express';
+// TitanChain Matching Engine Routes / TitanChain 撮合引擎路由
+// Handles order submission, cancellation, and order book management / 处理订单提交、取消和订单簿管理
+import * as express from 'express';
 import { MatchingEngine, Order } from '../../blockchain/matching/matching-engine';
 import { rateLimit } from 'express-rate-limit';
 
 const router = express.Router();
 
-// 创建撮合引擎实例
+// Create matching engine instance / 创建撮合引擎实例
 const matchingEngine = new MatchingEngine();
 
-// 限流配置
+// Rate limiting configuration / 限流配置
 const orderSubmissionLimit = rateLimit({
-  windowMs: 1000, // 1秒
-  max: 100, // 每秒最多100个订单
+  windowMs: 1000, // 1 second / 1秒
+  max: 100, // Maximum 100 orders per second / 每秒最多100个订单
   message: 'Too many orders submitted, please try again later',
   standardHeaders: true,
   legacyHeaders: false,
 });
 
 const generalLimit = rateLimit({
-  windowMs: 1000, // 1秒
-  max: 200, // 每秒最多200个请求
+  windowMs: 1000, // 1 second / 1秒
+  max: 200, // Maximum 200 requests per second / 每秒最多200个请求
   message: 'Too many requests, please try again later',
   standardHeaders: true,
   legacyHeaders: false,
 });
 
 /**
- * 提交订单
+ * Submit order / 提交订单
  */
 router.post('/orders', orderSubmissionLimit, async (req, res) => {
   try {
@@ -38,7 +40,7 @@ router.post('/orders', orderSubmissionLimit, async (req, res) => {
       });
     }
     
-    // 验证必需字段
+    // Validate required fields / 验证必需字段
     const requiredFields = ['id', 'symbol', 'side', 'type', 'price', 'quantity', 'account'];
     for (const field of requiredFields) {
       if (!order[field]) {
@@ -49,7 +51,7 @@ router.post('/orders', orderSubmissionLimit, async (req, res) => {
       }
     }
     
-    // 添加时间戳和nonce
+    // Add timestamp and nonce / 添加时间戳和nonce
     order.timestamp = Date.now();
     order.nonce = Math.floor(Math.random() * 1000000);
     
@@ -74,7 +76,7 @@ router.post('/orders', orderSubmissionLimit, async (req, res) => {
 });
 
 /**
- * 取消订单
+ * Cancel order / 取消订单
  */
 router.delete('/orders/:orderId', generalLimit, async (req, res) => {
   try {
@@ -109,7 +111,7 @@ router.delete('/orders/:orderId', generalLimit, async (req, res) => {
 });
 
 /**
- * 获取订单簿深度
+ * Get order book depth / 获取订单簿深度
  */
 router.get('/orderbook/:symbol', generalLimit, (req, res) => {
   try {
@@ -144,7 +146,7 @@ router.get('/orderbook/:symbol', generalLimit, (req, res) => {
 });
 
 /**
- * 获取撮合引擎统计信息
+ * Get matching engine statistics / 获取撮合引擎统计信息
  */
 router.get('/stats', generalLimit, (req, res) => {
   try {
@@ -165,7 +167,7 @@ router.get('/stats', generalLimit, (req, res) => {
 });
 
 /**
- * 批量提交订单
+ * Batch submit orders / 批量提交订单
  */
 router.post('/orders/batch', orderSubmissionLimit, async (req, res) => {
   try {
@@ -192,8 +194,8 @@ router.post('/orders/batch', orderSubmissionLimit, async (req, res) => {
       const order = orders[i];
       
       try {
-        // 添加时间戳和nonce
-        order.timestamp = timestamp + i; // 确保每个订单有唯一时间戳
+        // Add timestamp and nonce / 添加时间戳和nonce
+        order.timestamp = timestamp + i; // Ensure unique timestamp for each order / 确保每个订单有唯一时间戳
         order.nonce = Math.floor(Math.random() * 1000000);
         
         await matchingEngine.addOrder(order);
@@ -231,11 +233,11 @@ router.post('/orders/batch', orderSubmissionLimit, async (req, res) => {
 });
 
 /**
- * 获取交易对列表
+ * Get trading pairs list / 获取交易对列表
  */
 router.get('/symbols', generalLimit, (req, res) => {
   try {
-    // 模拟支持的交易对
+    // Simulate supported trading pairs / 模拟支持的交易对
     const symbols = [
       'BTC/USDT',
       'ETH/USDT',
@@ -263,7 +265,7 @@ router.get('/symbols', generalLimit, (req, res) => {
 });
 
 /**
- * 获取最近的撮合结果
+ * Get recent matching results / 获取最近的撮合结果
  */
 router.get('/matches', generalLimit, (req, res) => {
   try {
@@ -277,8 +279,8 @@ router.get('/matches', generalLimit, (req, res) => {
       });
     }
     
-    // 这里应该从撮合引擎获取历史撮合数据
-    // 目前返回模拟数据
+    // Should get historical matching data from matching engine / 这里应该从撮合引擎获取历史撮合数据
+    // Currently returning mock data / 目前返回模拟数据
     const matches = [];
     for (let i = 0; i < Math.min(limit, 20); i++) {
       matches.push({
@@ -310,7 +312,7 @@ router.get('/matches', generalLimit, (req, res) => {
 });
 
 /**
- * 健康检查
+ * Health check / 健康检查
  */
 router.get('/health', (req, res) => {
   try {
@@ -339,7 +341,7 @@ router.get('/health', (req, res) => {
   }
 });
 
-// 错误处理中间件
+// Error handling middleware / 错误处理中间件
 router.use((error: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
   console.error('Matching API error:', error);
   
@@ -351,7 +353,7 @@ router.use((error: any, req: express.Request, res: express.Response, next: expre
   }
 });
 
-// 优雅关闭处理
+// Graceful shutdown handling / 优雅关闭处理
 process.on('SIGTERM', () => {
   console.log('Shutting down matching engine...');
   matchingEngine.cleanup();

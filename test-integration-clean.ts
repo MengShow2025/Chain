@@ -3,7 +3,7 @@
  * 验证0-gas费规则和gas灵活规则在区块链核心代码中的完整集成
  */
 
-import { Transaction, ExchangeBatch } from './shared/types/blockchain.js';
+import { Transaction } from './shared/types/blockchain.js';
 import { ZeroGasEngine } from './blockchain/core/zero-gas-engine.js';
 import { SponsorPoolService } from './blockchain/core/sponsor-pool.js';
 import { shouldBeZeroGasTransaction, markZeroGasTransaction, isNativeTokenTransaction } from './shared/utils/native-token-utils.js';
@@ -107,38 +107,27 @@ runTest('ttUSD稳定币自动标记', () => {
   return shouldBeZero && markedTx.isZeroGas && isNative;
 });
 
-// 4. 验证交易所批量交易0-gas费
-runTest('交易所批量交易0-gas费', () => {
-  const exchangeBatch: ExchangeBatch = {
-    batchId: 'test_batch_001',
-    exchangeId: '0x1111111111111111111111111111111111111111',
-    totalTransactions: 5,
-    totalVolume: BigInt('5000000000000000000'),
-    timestamp: Date.now(),
-    transactions: [],
-    status: 'pending',
-    createdAt: Date.now()
-  };
-
+// 4. 验证智能合约分层0-gas费
+runTest('智能合约分层0-gas费', () => {
   const tx: Transaction = {
-    hash: '0xtest_batch',
+    hash: '0xtest_contract_tier',
     from: '0x1000000000000000000000000000000000000003',
     to: '0x1111111111111111111111111111111111111111',
     value: BigInt('1000000000000000000'),
     gas: BigInt(30000),
     gasPrice: BigInt(20000000000),
-    data: '0xbatch',
+    data: '0xcontract',
     nonce: 0,
     timestamp: Date.now(),
     status: 'pending' as const,
     isZeroGas: false,
-    exchangeBatch
+    contractTier: 1
   };
 
   const shouldBeZero = shouldBeZeroGasTransaction(tx);
   const markedTx = markZeroGasTransaction(tx);
   
-  console.log(`     批量交易检测: ${!!tx.exchangeBatch}`);
+  console.log(`     合约层级: ${tx.contractTier}`);
   console.log(`     应该0-gas费: ${shouldBeZero}`);
   console.log(`     自动标记: ${markedTx.isZeroGas}`);
   
@@ -155,15 +144,13 @@ runTest('ZeroGasEngine引擎集成', () => {
     const hasCanProcess = typeof engine.canProcessAsZeroGas === 'function';
     const hasProcessMethod = typeof engine.processZeroGasTransaction === 'function';
     const hasGetStats = typeof engine.getEngineStats === 'function';
-    const hasGetBatchStatus = typeof engine.getBatchStatus === 'function';
     
     console.log(`     引擎实例化: ${hasEngine}`);
     console.log(`     资格检查方法: ${hasCanProcess}`);
     console.log(`     处理方法: ${hasProcessMethod}`);
     console.log(`     统计方法: ${hasGetStats}`);
-    console.log(`     批量状态方法: ${hasGetBatchStatus}`);
     
-    return hasEngine && hasCanProcess && hasProcessMethod && hasGetStats && hasGetBatchStatus;
+    return hasEngine && hasCanProcess && hasProcessMethod && hasGetStats;
   } catch (error: any) {
     console.log(`     引擎初始化错误: ${error.message}`);
     return false;
@@ -211,9 +198,9 @@ runTest('智能合约分层配置', () => {
   const tier2Config = ZERO_GAS_CONFIG.CONTRACT_TIER_FEES[2];
   const tier3Config = ZERO_GAS_CONFIG.CONTRACT_TIER_FEES[3];
   
-  const tier1Valid = tier1Config && tier1Config.fee && tier1Config.maxGas && tier1Config.dailyLimit;
-  const tier2Valid = tier2Config && tier2Config.fee && tier2Config.maxGas && tier2Config.dailyLimit;
-  const tier3Valid = tier3Config && tier3Config.fee && tier3Config.maxGas && tier3Config.dailyLimit;
+  const tier1Valid = !!(tier1Config && tier1Config.fee && tier1Config.maxGas && tier1Config.dailyLimit);
+  const tier2Valid = !!(tier2Config && tier2Config.fee && tier2Config.maxGas && tier2Config.dailyLimit);
+  const tier3Valid = !!(tier3Config && tier3Config.fee && tier3Config.maxGas && tier3Config.dailyLimit);
   
   console.log(`     Tier 1存在: ${hasTier1}, 配置完整: ${tier1Valid}`);
   console.log(`     Tier 2存在: ${hasTier2}, 配置完整: ${tier2Valid}`);

@@ -1,68 +1,70 @@
 #!/usr/bin/env node
 
-import { APIGateway, defaultGatewayConfig } from './api-gateway';
-import { ServiceDiscovery } from './service-discovery';
-import { LoadBalancer } from './load-balancer';
-import { HealthMonitor } from './health-monitor';
+// Simple Gateway Launcher for TitanChain API Gateway / TitanChain API网关的简单启动器
+// Provides easy setup and configuration for development and production / 为开发和生产提供简单的设置和配置
+import { GatewayManager, createDefaultGatewayConfig } from './gateway-manager';
+import { ServiceStatus, HealthCheckType } from './service-discovery';
 
-/**
- * 简单的网关启动器
- */
+// Simple gateway launcher / 简单的网关启动器
 async function startSimpleGateway() {
   console.log('🚀 启动TitanChain API网关...');
   
   try {
-    // 从环境变量获取配置
+    // Get configuration from environment variables / 从环境变量获取配置
     const port = parseInt(process.env.GATEWAY_PORT || '8080');
-    const host = process.env.GATEWAY_HOST || '0.0.0.0';
     
-    // 创建配置
-    const config = {
-      ...defaultGatewayConfig,
-      port,
-      host,
-      cors: {
-        ...defaultGatewayConfig.cors,
-        origin: process.env.CORS_ORIGIN || '*'
-      },
-      rateLimit: {
-        ...defaultGatewayConfig.rateLimit,
-        windowMs: parseInt(process.env.RATE_LIMIT_WINDOW || '60000'),
-        max: parseInt(process.env.RATE_LIMIT_MAX || '1000')
-      }
-    };
+    // Create configuration / 创建配置
+    const config = createDefaultGatewayConfig(port);
     
-    // 创建网关实例
-    const gateway = new APIGateway(config);
+    // Override with environment variables / 使用环境变量覆盖配置
+    if (process.env.CORS_ORIGIN) {
+      config.gateway.corsOrigins = [process.env.CORS_ORIGIN];
+    }
+    if (process.env.RATE_LIMIT_WINDOW) {
+      config.gateway.rateLimitWindowMs = parseInt(process.env.RATE_LIMIT_WINDOW);
+    }
+    if (process.env.RATE_LIMIT_MAX) {
+      config.gateway.rateLimitMaxRequests = parseInt(process.env.RATE_LIMIT_MAX);
+    }
     
-    // 注册一些示例服务
-    await registerExampleServices(gateway);
+    // Create and start gateway manager / 创建并启动网关管理器
+    const gatewayManager = new GatewayManager(config);
     
-    // 启动网关
-    await gateway.start();
+    // Register example services / 注册示例服务
+    await registerExampleServices(gatewayManager);
     
-    console.log(`✅ API网关已启动在 http://${host}:${port}`);
-    console.log(`📊 健康检查: http://${host}:${port}/health`);
-    console.log(`📈 统计信息: http://${host}:${port}/stats`);
-    console.log(`🔍 服务列表: http://${host}:${port}/services`);
+    // Start the gateway / 启动网关
+    await gatewayManager.start();
     
-    // 优雅关闭处理
-    const shutdown = async (signal: string) => {
-      console.log(`\n🛑 收到${signal}信号，正在关闭网关...`);
+    console.log(`✅ TitanChain API网关已启动在端口 ${port}`);
+    console.log(`📊 健康检查端点: http://localhost:${port}/health`);
+    console.log(`🔍 服务发现端点: http://localhost:${port}/services`);
+    console.log(`📈 统计信息端点: http://localhost:${port}/stats`);
+    
+    // Graceful shutdown / 优雅关闭
+    process.on('SIGINT', async () => {
+      console.log('\n🛑 正在关闭网关...');
       try {
-        await gateway.stop();
+        await gatewayManager.stop();
         console.log('✅ 网关已安全关闭');
         process.exit(0);
       } catch (error) {
         console.error('❌ 关闭网关时出错:', error);
         process.exit(1);
       }
-    };
+    });
     
-    process.on('SIGTERM', () => shutdown('SIGTERM'));
-    process.on('SIGINT', () => shutdown('SIGINT'));
-    
-    return gateway;
+    process.on('SIGTERM', async () => {
+      console.log('\n🛑 收到终止信号，正在关闭网关...');
+      try {
+        await gatewayManager.stop();
+        console.log('✅ 网关已安全关闭');
+        process.exit(0);
+      } catch (error) {
+        console.error('❌ 关闭网关时出错:', error);
+        process.exit(1);
+      }
+    });
     
   } catch (error) {
     console.error('❌ 启动网关失败:', error);
@@ -70,73 +72,72 @@ async function startSimpleGateway() {
   }
 }
 
-/**
- * 注册示例服务
- */
-async function registerExampleServices(gateway: APIGateway) {
-  console.log('📝 注册示例服务...');
+// Register example services for demonstration / 注册示例服务用于演示
+async function registerExampleServices(gatewayManager: GatewayManager) {
+  const serviceDiscovery = gatewayManager.getServiceDiscovery();
   
-  // 注册区块链节点服务
-  gateway.serviceDiscovery.registerService({
+  // Register blockchain node service / 注册区块链节点服务
+  await serviceDiscovery.registerService({
     serviceName: 'blockchain-node',
     instance: {
       id: 'node-1',
       host: 'localhost',
       port: 3001,
-      status: 'healthy' as const,
+      protocol: 'http',
+      status: ServiceStatus.HEALTHY,
       weight: 100,
       metadata: {
         version: '1.0.0',
         region: 'local',
-        zone: 'zone-a'
+        zone: 'zone-a',
+        tags: ['blockchain', 'node', 'primary'],
+        capabilities: ['consensus', 'storage']
       }
     },
     ttl: 30,
-    tags: ['blockchain', 'node', 'primary']
+    tags: ['blockchain', 'node', 'primary'],
+    checks: [{
+      type: HealthCheckType.HTTP,
+      url: 'http://localhost:3001/health',
+      interval: 30000,
+      timeout: 5000
+    }]
   });
   
-  // 注册撮合引擎服务
-  gateway.serviceDiscovery.registerService({
+  // Register matching engine service / 注册撮合引擎服务
+  await serviceDiscovery.registerService({
     serviceName: 'matching-engine',
     instance: {
       id: 'engine-1',
       host: 'localhost',
       port: 3002,
-      status: 'healthy' as const,
+      protocol: 'http',
+      status: ServiceStatus.HEALTHY,
       weight: 100,
       metadata: {
         version: '1.0.0',
         region: 'local',
-        zone: 'zone-a'
+        zone: 'zone-a',
+        tags: ['trading', 'engine', 'primary'],
+        capabilities: ['matching', 'orderbook']
       }
     },
     ttl: 30,
-    tags: ['trading', 'engine', 'primary']
+    tags: ['trading', 'engine', 'primary'],
+    checks: [{
+      type: HealthCheckType.HTTP,
+      url: 'http://localhost:3002/health',
+      interval: 30000,
+      timeout: 5000
+    }]
   });
   
-  // 添加健康检查
-  gateway.healthMonitor.addHealthCheck({
-    id: 'blockchain-node-health',
-    target: 'http://localhost:3001/health',
-    type: 'http' as const,
-    interval: 30000,
-    timeout: 5000,
-    retries: 3
-  });
-  
-  gateway.healthMonitor.addHealthCheck({
-    id: 'matching-engine-health',
-    target: 'http://localhost:3002/health',
-    type: 'http' as const,
-    interval: 30000,
-    timeout: 5000,
-    retries: 3
-  });
-  
-  console.log('✅ 示例服务注册完成');
+  console.log('📋 已注册示例服务: blockchain-node, matching-engine');
 }
 
-// 启动网关
-startSimpleGateway().catch(console.error);
+// Start the gateway if this file is run directly / 如果直接运行此文件则启动网关
+if (require.main === module) {
+  startSimpleGateway().catch(console.error);
+}
 
 export { startSimpleGateway };

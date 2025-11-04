@@ -1,14 +1,16 @@
+// TitanChain Validator Routes / TitanChain 验证节点路由
+// Handles validator registration, management and network statistics / 处理验证节点注册、管理和网络统计
 import { Router } from 'express';
-import { ValidatorManager } from './validator-manager.js';
+import { ValidatorManager } from './validator-manager';
 
 const router = Router();
 const validatorManager = new ValidatorManager();
 
-// 区块链服务URL
+// Blockchain service URL / 区块链服务URL
 const BLOCKCHAIN_SERVICE_URL = 'http://localhost:3001';
 
 /**
- * 代理请求到区块链服务
+ * Proxy requests to blockchain service / 代理请求到区块链服务
  */
 async function proxyToBlockchainService(endpoint: string, method: string = 'GET', body?: any) {
   try {
@@ -22,24 +24,20 @@ async function proxyToBlockchainService(endpoint: string, method: string = 'GET'
     
     return await response.json();
   } catch (error) {
-    console.error(`代理请求失败 ${endpoint}:`, error);
+    console.error(`Proxy request failed ${endpoint} / 代理请求失败 ${endpoint}:`, error);
     return { success: false, error: 'Internal server error' };
   }
 }
 
-/**
- * 验证节点相关路由
- */
-
-// 注册验证节点
+// Register validator node / 注册验证节点
 router.post('/register', async (req, res) => {
   await validatorManager.registerValidator(req, res);
 });
 
-// 获取验证节点列表 - 优先从区块链服务获取
+// Get validator list - prioritize blockchain service / 获取验证节点列表 - 优先从区块链服务获取
 router.get('/', async (req, res) => {
   try {
-    // 首先尝试从区块链服务获取
+    // First try to get from blockchain service / 首先尝试从区块链服务获取
     const blockchainData = await proxyToBlockchainService('/api/validators');
     
     if (blockchainData.success) {
@@ -47,32 +45,32 @@ router.get('/', async (req, res) => {
       return;
     }
     
-    // 如果区块链服务不可用，使用本地验证节点管理器
-    console.log('区块链服务不可用，使用本地验证节点数据');
+    // If blockchain service unavailable, use local validator manager / 如果区块链服务不可用，使用本地验证节点管理器
+    console.log('Blockchain service unavailable, using local validator data / 区块链服务不可用，使用本地验证节点数据');
     await validatorManager.getValidators(req, res);
   } catch (error) {
-    console.error('获取验证节点列表失败:', error);
-    // 回退到本地验证节点管理器
+    console.error('Failed to get validator list / 获取验证节点列表失败:', error);
+    // Fallback to local validator manager / 回退到本地验证节点管理器
     await validatorManager.getValidators(req, res);
   }
 });
 
-// 获取单个验证节点信息
+// Get single validator information / 获取单个验证节点信息
 router.get('/:address', async (req, res) => {
   await validatorManager.getValidator(req, res);
 });
 
-// 更新验证节点质押
+// Update validator stake / 更新验证节点质押
 router.put('/:address/stake', async (req, res) => {
   await validatorManager.updateStake(req, res);
 });
 
-// 获取候补节点列表
+// Get candidate node list / 获取候补节点列表
 router.get('/candidates/list', async (req, res) => {
   await validatorManager.getCandidateNodes(req, res);
 });
 
-// 获取网络统计
+// Get network statistics / 获取网络统计
 router.get('/network/stats', async (req, res) => {
   await validatorManager.getNetworkStats(req, res);
 });

@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
-import { Validator, CandidateNode, StakingInfo, ValidatorPerformance } from '../../shared/types/blockchain.js';
-import { CONSENSUS_CONFIG, VALIDATOR_STATUS, API_ENDPOINTS } from '../../shared/constants/blockchain.js';
-import { blockchainInstance } from '../../shared/blockchain-instance.js';
+import { Validator, CandidateNode, StakingInfo, ValidatorPerformance } from '../../shared/types/blockchain';
+import { CONSENSUS_CONFIG, VALIDATOR_STATUS, API_ENDPOINTS } from '../../shared/constants/blockchain';
+import { blockchainInstance } from '../../shared/blockchain-instance';
 
 /**
  * 验证节点管理器
@@ -16,23 +16,23 @@ export class ValidatorManager {
   constructor() {
     console.log('ValidatorManager initialized');
     
-    // 初始化创世验证节点
+    // Initialize genesis validators / 初始化创世验证节点
     this.initializeGenesisValidators();
     
-    // 启动性能监控
+    // Start performance monitoring / 启动性能监控
     setInterval(() => {
       this.updatePerformanceMetrics();
-    }, 30000); // 每30秒更新一次
+    }, 30000); // Update every 30 seconds / 每30秒更新一次
     
-    // 启动奖励分发
+    // Start reward distribution / 启动奖励分发
     setInterval(() => {
       this.distributeRewards();
-    }, 60000); // 每分钟分发一次奖励
+    }, 60000); // Distribute rewards every minute / 每分钟分发一次奖励
 
-    // 启动验证节点同步
+    // Start validator synchronization / 启动验证节点同步
     setInterval(() => {
       this.syncValidatorsFromBlockchain();
-    }, 10000); // 每10秒同步一次验证节点数据
+    }, 10000); // Sync validator data every 10 seconds / 每10秒同步一次验证节点数据
   }
   
   /**
@@ -42,7 +42,7 @@ export class ValidatorManager {
     try {
       const { address, publicKey, stake, metadata } = req.body;
       
-      // 验证输入参数
+      // Validate input parameters / 验证输入参数
       if (!address || !publicKey || !stake) {
         res.status(400).json({
           success: false,
@@ -51,7 +51,7 @@ export class ValidatorManager {
         return;
       }
       
-      // 检查最小质押量
+      // Check minimum stake amount / 检查最小质押量
       const stakeAmount = BigInt(stake);
       if (stakeAmount < CONSENSUS_CONFIG.MIN_VALIDATOR_STAKE) {
         res.status(400).json({
@@ -61,7 +61,7 @@ export class ValidatorManager {
         return;
       }
       
-      // 检查验证节点是否已存在
+      // Check if validator already exists / 检查验证节点是否已存在
       if (this.validators.has(address)) {
         res.status(409).json({
           success: false,
@@ -70,10 +70,10 @@ export class ValidatorManager {
         return;
       }
       
-      // 检查验证节点数量限制
+      // Check validator count limit / 检查验证节点数量限制
       const activeValidators = this.getActiveValidators();
       if (activeValidators.length >= CONSENSUS_CONFIG.MAX_VALIDATORS) {
-        // 添加到候补节点列表
+        // Add to candidate node list / 添加到候补节点列表
         await this.addCandidateNode(address, publicKey, stakeAmount, metadata);
         
         res.json({
@@ -84,14 +84,14 @@ export class ValidatorManager {
         return;
       }
       
-      // 创建验证节点
+      // Create validator / 创建验证节点
       const validator: Validator = {
         address,
         publicKey,
         stake: stakeAmount,
         delegatedStake: BigInt(0),
         totalStake: stakeAmount,
-        commission: 5, // 默认5%佣金
+        commission: 5, // Default 5% commission / 默认5%佣金
         status: VALIDATOR_STATUS.ACTIVE,
         performance: {
           blocksProduced: 0,
@@ -113,16 +113,16 @@ export class ValidatorManager {
         lastActiveBlock: 0
       };
       
-      // 添加验证节点
+      // Add validator / 添加验证节点
       this.validators.set(address, validator);
       
-      // 创建质押信息
+      // Create staking info / 创建质押信息
       const stakingInfo: StakingInfo = {
         validator: address,
-        delegator: address, // 自质押
+        delegator: address, // Self-staking / 自质押
         amount: stakeAmount,
         rewards: BigInt(0),
-        lockPeriod: 0, // 验证节点无锁定期
+        lockPeriod: 0, // No lock period for validators / 验证节点无锁定期
         unlockTime: 0,
         status: 'active'
       };

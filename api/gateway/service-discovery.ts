@@ -1,666 +1,435 @@
+// Service Discovery implementation for microservices / 微服务的服务发现实现
 import { EventEmitter } from 'events';
-import { ServiceInstance, ServiceStatus, ServiceMetadata } from './load-balancer';
 
-/**
- * 服务注册信息
- */
+// Service instance interface / 服务实例接口
+export interface ServiceInstance {
+  id: string;
+  host: string;
+  port: number;
+  protocol: string;
+  weight: number;
+  status: ServiceStatus;
+  metadata: ServiceMetadata;
+}
+
+// Service metadata interface / 服务元数据接口
+export interface ServiceMetadata {
+  version: string;
+  region: string;
+  zone: string;
+  tags: string[];
+  capabilities: string[];
+}
+
+// Service registration interface / 服务注册接口
 export interface ServiceRegistration {
   serviceName: string;
   instance: ServiceInstance;
-  ttl?: number; // 生存时间（秒）
-  tags?: string[];
-  checks?: HealthCheck[];
+  ttl: number;
+  tags: string[];
+  checks: HealthCheck[];
 }
 
-/**
- * 健康检查配置
- */
+// Health check interface / 健康检查接口
 export interface HealthCheck {
-  id: string;
-  name: string;
-  type: 'http' | 'tcp' | 'script';
+  type: HealthCheckType;
   url?: string;
   interval: number;
   timeout: number;
-  deregisterCriticalServiceAfter?: number;
+  script?: string;
 }
 
-/**
- * 服务查询条件
- */
+// Health check types / 健康检查类型
+export enum HealthCheckType {
+  HTTP = 'http',
+  TCP = 'tcp',
+  SCRIPT = 'script'
+}
+
+// Service query interface / 服务查询接口
 export interface ServiceQuery {
   serviceName?: string;
   tags?: string[];
-  status?: ServiceStatus;
+  healthy?: boolean;
   region?: string;
   zone?: string;
-  version?: string;
 }
 
-/**
- * 服务发现事件
- */
+// Service discovery event interface / 服务发现事件接口
 export interface ServiceDiscoveryEvent {
-  type: 'service_registered' | 'service_deregistered' | 'service_updated' | 'health_changed';
+  type: 'register' | 'deregister' | 'health_change';
   serviceName: string;
   instance: ServiceInstance;
   timestamp: number;
 }
 
-/**
- * 服务目录
- */
+// Service catalog interface / 服务目录接口
 export interface ServiceCatalog {
-  [serviceName: string]: {
-    instances: ServiceInstance[];
-    lastUpdated: number;
-    metadata?: any;
-  };
+  services: Map<string, ServiceInstance[]>;
+  lastUpdated: number;
 }
 
-/**
- * 服务发现统计信息
- */
+// Service discovery statistics / 服务发现统计
 export interface ServiceDiscoveryStats {
   totalServices: number;
+  healthyServices: number;
+  unhealthyServices: number;
   totalInstances: number;
-  healthyInstances: number;
-  unhealthyInstances: number;
-  registrationsPerMinute: number;
-  deregistrationsPerMinute: number;
+  registrations: number;
+  deregistrations: number;
+  healthChecks: number;
 }
 
-/**
- * 服务发现类
- */
+// Service status enum / 服务状态枚举
+export enum ServiceStatus {
+  HEALTHY = 'healthy',
+  UNHEALTHY = 'unhealthy',
+  DRAINING = 'draining',
+  UNKNOWN = 'unknown'
+}
+
+// Main Service Discovery class / 主要服务发现类
 export class ServiceDiscovery extends EventEmitter {
-  private services: Map<string, Map<string, ServiceRegistration>>;
-  private healthChecks: Map<string, HealthCheck>;
-  private healthCheckIntervals: Map<string, NodeJS.Timeout>;
-  private ttlTimers: Map<string, NodeJS.Timeout>;
+  private services: Map<string, ServiceInstance[]> = new Map();
+  private healthChecks: Map<string, NodeJS.Timeout> = new Map();
   private stats: ServiceDiscoveryStats;
-  private eventHistory: ServiceDiscoveryEvent[];
-  private maxEventHistory: number;
+  private isRunning = false;
 
   constructor() {
     super();
-    
-    this.services = new Map();
-    this.healthChecks = new Map();
-    this.healthCheckIntervals = new Map();
-    this.ttlTimers = new Map();
-    this.eventHistory = [];
-    this.maxEventHistory = 1000;
-    
     this.stats = {
       totalServices: 0,
+      healthyServices: 0,
+      unhealthyServices: 0,
       totalInstances: 0,
-      healthyInstances: 0,
-      unhealthyInstances: 0,
-      registrationsPerMinute: 0,
-      deregistrationsPerMinute: 0
-    };
-    
-    console.log('ServiceDiscovery initialized');
-    
-    // 定期更新统计信息
-    setInterval(() => {
-      this.updateStats();
-    }, 60000); // 每分钟更新一次
-  }
-
-  /**
-   * 注册服务
-   */
-  registerService(registration: ServiceRegistration): boolean {
-    try {
-      const { serviceName, instance } = registration;
-      
-      // 确保服务存在
-      if (!this.services.has(serviceName)) {
-        this.services.set(serviceName, new Map());
-      }
-      
-      const serviceInstances = this.services.get(serviceName)!;
-      
-      // 检查实例是否已存在
-      if (serviceInstances.has(instance.id)) {
-        console.log(`Service instance ${instance.id} already registered, updating...`);
-        return this.updateService(registration);
-      }
-      
-      // 注册新实例
-      serviceInstances.set(instance.id, registration);
-      
-      // 设置TTL定时器
-      if (registration.ttl) {
-        this.setTTLTimer(serviceName, instance.id, registration.ttl);
-      }
-      
-      // 启动健康检查
-      if (registration.checks) {
-        for (const check of registration.checks) {
-          this.startHealthCheck(serviceName, instance.id, check);
-        }
-      }
-      
-      // 记录事件
-      this.recordEvent({
-        type: 'service_registered',
-        serviceName,
-        instance,
-        timestamp: Date.now()
-      });
-      
-      console.log(`Service registered: ${serviceName}/${instance.id} (${instance.host}:${instance.port})`);
-      this.emit('service:registered', { serviceName, instance });
-      
-      return true;
-      
-    } catch (error) {
-      console.error('Failed to register service:', error);
-      return false;
-    }
-  }
-
-  /**
-   * 注销服务
-   */
-  deregisterService(serviceName: string, instanceId: string): boolean {
-    try {
-      const serviceInstances = this.services.get(serviceName);
-      if (!serviceInstances || !serviceInstances.has(instanceId)) {
-        console.log(`Service instance not found: ${serviceName}/${instanceId}`);
-        return false;
-      }
-      
-      const registration = serviceInstances.get(instanceId)!;
-      
-      // 移除实例
-      serviceInstances.delete(instanceId);
-      
-      // 如果服务没有实例了，移除服务
-      if (serviceInstances.size === 0) {
-        this.services.delete(serviceName);
-      }
-      
-      // 清理TTL定时器
-      this.clearTTLTimer(serviceName, instanceId);
-      
-      // 停止健康检查
-      this.stopHealthCheck(serviceName, instanceId);
-      
-      // 记录事件
-      this.recordEvent({
-        type: 'service_deregistered',
-        serviceName,
-        instance: registration.instance,
-        timestamp: Date.now()
-      });
-      
-      console.log(`Service deregistered: ${serviceName}/${instanceId}`);
-      this.emit('service:deregistered', { serviceName, instance: registration.instance });
-      
-      return true;
-      
-    } catch (error) {
-      console.error('Failed to deregister service:', error);
-      return false;
-    }
-  }
-
-  /**
-   * 更新服务
-   */
-  updateService(registration: ServiceRegistration): boolean {
-    try {
-      const { serviceName, instance } = registration;
-      
-      const serviceInstances = this.services.get(serviceName);
-      if (!serviceInstances || !serviceInstances.has(instance.id)) {
-        console.log(`Service instance not found for update: ${serviceName}/${instance.id}`);
-        return false;
-      }
-      
-      // 更新注册信息
-      serviceInstances.set(instance.id, registration);
-      
-      // 更新TTL定时器
-      if (registration.ttl) {
-        this.clearTTLTimer(serviceName, instance.id);
-        this.setTTLTimer(serviceName, instance.id, registration.ttl);
-      }
-      
-      // 记录事件
-      this.recordEvent({
-        type: 'service_updated',
-        serviceName,
-        instance,
-        timestamp: Date.now()
-      });
-      
-      console.log(`Service updated: ${serviceName}/${instance.id}`);
-      this.emit('service:updated', { serviceName, instance });
-      
-      return true;
-      
-    } catch (error) {
-      console.error('Failed to update service:', error);
-      return false;
-    }
-  }
-
-  /**
-   * 发现服务
-   */
-  discoverServices(query: ServiceQuery = {}): ServiceInstance[] {
-    const results: ServiceInstance[] = [];
-    
-    try {
-      // 如果指定了服务名，只查找该服务
-      if (query.serviceName) {
-        const serviceInstances = this.services.get(query.serviceName);
-        if (serviceInstances) {
-          for (const registration of serviceInstances.values()) {
-            if (this.matchesQuery(registration, query)) {
-              results.push(registration.instance);
-            }
-          }
-        }
-      } else {
-        // 查找所有服务
-        for (const serviceInstances of this.services.values()) {
-          for (const registration of serviceInstances.values()) {
-            if (this.matchesQuery(registration, query)) {
-              results.push(registration.instance);
-            }
-          }
-        }
-      }
-      
-      console.log(`Service discovery query returned ${results.length} instances`);
-      return results;
-      
-    } catch (error) {
-      console.error('Service discovery failed:', error);
-      return [];
-    }
-  }
-
-  /**
-   * 获取服务实例
-   */
-  getServiceInstances(serviceName: string): ServiceInstance[] {
-    const serviceInstances = this.services.get(serviceName);
-    if (!serviceInstances) {
-      return [];
-    }
-    
-    return Array.from(serviceInstances.values()).map(reg => reg.instance);
-  }
-
-  /**
-   * 获取健康的服务实例
-   */
-  getHealthyServiceInstances(serviceName: string): ServiceInstance[] {
-    return this.getServiceInstances(serviceName).filter(
-      instance => instance.status === ServiceStatus.HEALTHY
-    );
-  }
-
-  /**
-   * 获取服务目录
-   */
-  getServiceCatalog(): ServiceCatalog {
-    const catalog: ServiceCatalog = {};
-    
-    for (const [serviceName, serviceInstances] of this.services) {
-      catalog[serviceName] = {
-        instances: Array.from(serviceInstances.values()).map(reg => reg.instance),
-        lastUpdated: Date.now(),
-        metadata: {
-          instanceCount: serviceInstances.size,
-          healthyCount: Array.from(serviceInstances.values())
-            .filter(reg => reg.instance.status === ServiceStatus.HEALTHY).length
-        }
-      };
-    }
-    
-    return catalog;
-  }
-
-  /**
-   * 监听服务变化
-   */
-  watchService(serviceName: string, callback: (event: ServiceDiscoveryEvent) => void): () => void {
-    const listener = (event: ServiceDiscoveryEvent) => {
-      if (event.serviceName === serviceName) {
-        callback(event);
-      }
-    };
-    
-    this.on('service:registered', listener);
-    this.on('service:deregistered', listener);
-    this.on('service:updated', listener);
-    this.on('service:health_changed', listener);
-    
-    // 返回取消监听的函数
-    return () => {
-      this.off('service:registered', listener);
-      this.off('service:deregistered', listener);
-      this.off('service:updated', listener);
-      this.off('service:health_changed', listener);
+      registrations: 0,
+      deregistrations: 0,
+      healthChecks: 0
     };
   }
 
-  /**
-   * 检查查询条件匹配
-   */
-  private matchesQuery(registration: ServiceRegistration, query: ServiceQuery): boolean {
-    const { instance } = registration;
+  // Register a service instance / 注册服务实例
+  async registerService(registration: ServiceRegistration): Promise<void> {
+    const { serviceName, instance, ttl, tags, checks } = registration;
     
-    // 检查状态
-    if (query.status && instance.status !== query.status) {
-      return false;
-    }
+    // Get or create service instances array / 获取或创建服务实例数组
+    let instances = this.services.get(serviceName) || [];
     
-    // 检查标签
-    if (query.tags && query.tags.length > 0) {
-      const instanceTags = registration.tags || [];
-      if (!query.tags.every(tag => instanceTags.includes(tag))) {
-        return false;
-      }
-    }
+    // Check if instance already exists / 检查实例是否已存在
+    const existingIndex = instances.findIndex(inst => inst.id === instance.id);
     
-    // 检查区域
-    if (query.region && instance.metadata?.region !== query.region) {
-      return false;
-    }
-    
-    // 检查可用区
-    if (query.zone && instance.metadata?.zone !== query.zone) {
-      return false;
-    }
-    
-    // 检查版本
-    if (query.version && instance.metadata?.version !== query.version) {
-      return false;
-    }
-    
-    return true;
-  }
-
-  /**
-   * 设置TTL定时器
-   */
-  private setTTLTimer(serviceName: string, instanceId: string, ttl: number): void {
-    const key = `${serviceName}:${instanceId}`;
-    
-    // 清除现有定时器
-    this.clearTTLTimer(serviceName, instanceId);
-    
-    // 设置新定时器
-    const timer = setTimeout(() => {
-      console.log(`Service TTL expired: ${serviceName}/${instanceId}`);
-      this.deregisterService(serviceName, instanceId);
-    }, ttl * 1000);
-    
-    this.ttlTimers.set(key, timer);
-  }
-
-  /**
-   * 清除TTL定时器
-   */
-  private clearTTLTimer(serviceName: string, instanceId: string): void {
-    const key = `${serviceName}:${instanceId}`;
-    const timer = this.ttlTimers.get(key);
-    
-    if (timer) {
-      clearTimeout(timer);
-      this.ttlTimers.delete(key);
-    }
-  }
-
-  /**
-   * 启动健康检查
-   */
-  private startHealthCheck(serviceName: string, instanceId: string, check: HealthCheck): void {
-    const key = `${serviceName}:${instanceId}:${check.id}`;
-    
-    // 停止现有健康检查
-    this.stopHealthCheck(serviceName, instanceId, check.id);
-    
-    // 存储健康检查配置
-    this.healthChecks.set(key, check);
-    
-    // 启动定期健康检查
-    const interval = setInterval(async () => {
-      await this.performHealthCheck(serviceName, instanceId, check);
-    }, check.interval);
-    
-    this.healthCheckIntervals.set(key, interval);
-    
-    // 立即执行一次健康检查
-    this.performHealthCheck(serviceName, instanceId, check);
-    
-    console.log(`Health check started: ${key}`);
-  }
-
-  /**
-   * 停止健康检查
-   */
-  private stopHealthCheck(serviceName: string, instanceId: string, checkId?: string): void {
-    if (checkId) {
-      const key = `${serviceName}:${instanceId}:${checkId}`;
-      this.stopSingleHealthCheck(key);
+    if (existingIndex >= 0) {
+      // Update existing instance / 更新现有实例
+      instances[existingIndex] = { ...instance };
     } else {
-      // 停止该实例的所有健康检查
-      const prefix = `${serviceName}:${instanceId}:`;
-      for (const key of this.healthCheckIntervals.keys()) {
-        if (key.startsWith(prefix)) {
-          this.stopSingleHealthCheck(key);
-        }
-      }
-    }
-  }
-
-  /**
-   * 停止单个健康检查
-   */
-  private stopSingleHealthCheck(key: string): void {
-    const interval = this.healthCheckIntervals.get(key);
-    if (interval) {
-      clearInterval(interval);
-      this.healthCheckIntervals.delete(key);
+      // Add new instance / 添加新实例
+      instances.push({ ...instance });
+      this.stats.registrations++;
+      this.stats.totalInstances++;
     }
     
-    this.healthChecks.delete(key);
+    this.services.set(serviceName, instances);
+    this.updateServiceStats();
+    
+    // Setup health checks / 设置健康检查
+    this.setupHealthChecks(serviceName, instance, checks);
+    
+    // Emit registration event / 发出注册事件
+    this.emit('service_registered', {
+      type: 'register',
+      serviceName,
+      instance,
+      timestamp: Date.now()
+    } as ServiceDiscoveryEvent);
+    
+    console.log(`Service registered: ${serviceName} (${instance.id})`);
   }
 
-  /**
-   * 执行健康检查
-   */
-  private async performHealthCheck(serviceName: string, instanceId: string, check: HealthCheck): Promise<void> {
-    try {
-      const serviceInstances = this.services.get(serviceName);
-      if (!serviceInstances) {
-        return;
+  // Deregister a service instance / 注销服务实例
+  async deregisterService(serviceName: string, instanceId: string): Promise<void> {
+    const instances = this.services.get(serviceName);
+    
+    if (!instances) {
+      return;
+    }
+    
+    const instanceIndex = instances.findIndex(inst => inst.id === instanceId);
+    
+    if (instanceIndex >= 0) {
+      const instance = instances[instanceIndex];
+      instances.splice(instanceIndex, 1);
+      
+      if (instances.length === 0) {
+        this.services.delete(serviceName);
+      } else {
+        this.services.set(serviceName, instances);
       }
       
-      const registration = serviceInstances.get(instanceId);
-      if (!registration) {
-        return;
+      // Cleanup health checks / 清理健康检查
+      const healthCheckKey = `${serviceName}:${instanceId}`;
+      const healthCheckTimer = this.healthChecks.get(healthCheckKey);
+      if (healthCheckTimer) {
+        clearInterval(healthCheckTimer);
+        this.healthChecks.delete(healthCheckKey);
       }
       
-      const startTime = Date.now();
-      const isHealthy = await this.executeHealthCheck(registration.instance, check);
-      const responseTime = Date.now() - startTime;
+      this.stats.deregistrations++;
+      this.stats.totalInstances--;
+      this.updateServiceStats();
       
-      const previousStatus = registration.instance.status;
-      registration.instance.status = isHealthy ? ServiceStatus.HEALTHY : ServiceStatus.UNHEALTHY;
-      registration.instance.lastHealthCheck = Date.now();
-      registration.instance.responseTime = responseTime;
+      // Emit deregistration event / 发出注销事件
+      this.emit('service_deregistered', {
+        type: 'deregister',
+        serviceName,
+        instance,
+        timestamp: Date.now()
+      } as ServiceDiscoveryEvent);
       
-      if (previousStatus !== registration.instance.status) {
-        console.log(`Health check status changed: ${serviceName}/${instanceId} ${previousStatus} -> ${registration.instance.status}`);
-        
-        // 记录事件
-        this.recordEvent({
-          type: 'health_changed',
-          serviceName,
-          instance: registration.instance,
-          timestamp: Date.now()
-        });
-        
-        this.emit('service:health_changed', {
-          serviceName,
-          instance: registration.instance,
-          previousStatus,
-          check
-        });
-      }
-      
-    } catch (error) {
-      console.error(`Health check failed for ${serviceName}/${instanceId}:`, error);
+      console.log(`Service deregistered: ${serviceName} (${instanceId})`);
     }
   }
 
-  /**
-   * 执行具体的健康检查
-   */
-  private async executeHealthCheck(instance: ServiceInstance, check: HealthCheck): Promise<boolean> {
-    return new Promise((resolve) => {
-      const timeout = setTimeout(() => {
-        resolve(false); // 超时视为不健康
-      }, check.timeout);
+  // Get service instances / 获取服务实例
+  getService(serviceName: string): ServiceInstance[] {
+    return this.services.get(serviceName) || [];
+  }
+
+  // Get all services / 获取所有服务
+  getAllServices(): ServiceCatalog {
+    return {
+      services: new Map(this.services),
+      lastUpdated: Date.now()
+    };
+  }
+
+  // Query services with filters / 使用过滤器查询服务
+  queryServices(query: ServiceQuery): ServiceInstance[] {
+    let results: ServiceInstance[] = [];
+    
+    // Get services by name or all services / 按名称获取服务或所有服务
+    if (query.serviceName) {
+      results = this.getService(query.serviceName);
+    } else {
+      for (const instances of Array.from(this.services.values())) {
+        results.push(...instances);
+      }
+    }
+    
+    // Apply filters / 应用过滤器
+    if (query.healthy !== undefined) {
+      results = results.filter(instance => 
+        query.healthy ? instance.status === ServiceStatus.HEALTHY : instance.status !== ServiceStatus.HEALTHY
+      );
+    }
+    
+    if (query.tags && query.tags.length > 0) {
+      results = results.filter(instance =>
+        query.tags!.some(tag => instance.metadata.tags.includes(tag))
+      );
+    }
+    
+    if (query.region) {
+      results = results.filter(instance => instance.metadata.region === query.region);
+    }
+    
+    if (query.zone) {
+      results = results.filter(instance => instance.metadata.zone === query.zone);
+    }
+    
+    return results;
+  }
+
+  // Setup health checks for service instance / 为服务实例设置健康检查
+  private setupHealthChecks(serviceName: string, instance: ServiceInstance, checks: HealthCheck[]): void {
+    const healthCheckKey = `${serviceName}:${instance.id}`;
+    
+    // Clear existing health check / 清除现有健康检查
+    const existingTimer = this.healthChecks.get(healthCheckKey);
+    if (existingTimer) {
+      clearInterval(existingTimer);
+    }
+    
+    if (checks.length === 0) {
+      return;
+    }
+    
+    // Setup new health check / 设置新的健康检查
+    const timer = setInterval(async () => {
+      await this.performHealthCheck(serviceName, instance, checks);
+    }, checks[0].interval);
+    
+    this.healthChecks.set(healthCheckKey, timer);
+  }
+
+  // Perform health check / 执行健康检查
+  private async performHealthCheck(serviceName: string, instance: ServiceInstance, checks: HealthCheck[]): Promise<void> {
+    this.stats.healthChecks++;
+    
+    for (const check of checks) {
+      try {
+        let isHealthy = false;
+        
+        switch (check.type) {
+          case HealthCheckType.HTTP:
+            if (check.url) {
+              isHealthy = await this.performHttpHealthCheck(check.url, check.timeout);
+            }
+            break;
+          case HealthCheckType.TCP:
+            isHealthy = await this.performTcpHealthCheck(instance.host, instance.port, check.timeout);
+            break;
+          case HealthCheckType.SCRIPT:
+            if (check.script) {
+              isHealthy = await this.performScriptHealthCheck(check.script, check.timeout);
+            }
+            break;
+        }
+        
+        // Update instance status / 更新实例状态
+        const previousStatus = instance.status;
+        instance.status = isHealthy ? ServiceStatus.HEALTHY : ServiceStatus.UNHEALTHY;
+        
+        // Emit health change event if status changed / 如果状态改变则发出健康变化事件
+        if (previousStatus !== instance.status) {
+          this.emit('health_changed', {
+            type: 'health_change',
+            serviceName,
+            instance,
+            timestamp: Date.now()
+          } as ServiceDiscoveryEvent);
+          
+          console.log(`Health status changed for ${serviceName} (${instance.id}): ${previousStatus} -> ${instance.status}`);
+        }
+        
+      } catch (error) {
+        console.error(`Health check failed for ${serviceName} (${instance.id}):`, error);
+        instance.status = ServiceStatus.UNHEALTHY;
+      }
+    }
+    
+    this.updateServiceStats();
+  }
+
+  // Perform HTTP health check / 执行HTTP健康检查
+  private async performHttpHealthCheck(url: string, timeout: number): Promise<boolean> {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeout);
       
-      // 模拟健康检查
-      setTimeout(() => {
-        clearTimeout(timeout);
-        // 90% 的概率返回健康状态
-        resolve(Math.random() > 0.1);
-      }, Math.random() * 100 + 50); // 50-150ms 响应时间
+      const response = await fetch(url, {
+        method: 'GET',
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+      return response.ok;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  // Perform TCP health check / 执行TCP健康检查
+  private async performTcpHealthCheck(host: string, port: number, timeout: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const net = require('net');
+      const socket = new net.Socket();
+      
+      const timer = setTimeout(() => {
+        socket.destroy();
+        resolve(false);
+      }, timeout);
+      
+      socket.connect(port, host, () => {
+        clearTimeout(timer);
+        socket.destroy();
+        resolve(true);
+      });
+      
+      socket.on('error', () => {
+        clearTimeout(timer);
+        resolve(false);
+      });
     });
   }
 
-  /**
-   * 记录事件
-   */
-  private recordEvent(event: ServiceDiscoveryEvent): void {
-    this.eventHistory.push(event);
-    
-    // 限制事件历史大小
-    if (this.eventHistory.length > this.maxEventHistory) {
-      this.eventHistory.shift();
-    }
-    
-    // 触发事件
-    this.emit(`service:${event.type}`, event);
+  // Perform script health check / 执行脚本健康检查
+  private async performScriptHealthCheck(script: string, timeout: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const { exec } = require('child_process');
+      
+      const process = exec(script, { timeout }, (error: any, stdout: string, stderr: string) => {
+        if (error) {
+          resolve(false);
+        } else {
+          resolve(true);
+        }
+      });
+      
+      process.on('timeout', () => {
+        resolve(false);
+      });
+    });
   }
 
-  /**
-   * 更新统计信息
-   */
-  private updateStats(): void {
-    let totalInstances = 0;
-    let healthyInstances = 0;
-    let unhealthyInstances = 0;
+  // Update service statistics / 更新服务统计
+  private updateServiceStats(): void {
+    this.stats.totalServices = this.services.size;
+    this.stats.healthyServices = 0;
+    this.stats.unhealthyServices = 0;
+    this.stats.totalInstances = 0;
     
-    for (const serviceInstances of this.services.values()) {
-      for (const registration of serviceInstances.values()) {
-        totalInstances++;
-        
-        if (registration.instance.status === ServiceStatus.HEALTHY) {
-          healthyInstances++;
-        } else {
-          unhealthyInstances++;
-        }
+    for (const instances of Array.from(this.services.values())) {
+      this.stats.totalInstances += instances.length;
+      
+      const hasHealthyInstance = instances.some(inst => inst.status === ServiceStatus.HEALTHY);
+      const hasUnhealthyInstance = instances.some(inst => inst.status === ServiceStatus.UNHEALTHY);
+      
+      if (hasHealthyInstance) {
+        this.stats.healthyServices++;
+      }
+      if (hasUnhealthyInstance) {
+        this.stats.unhealthyServices++;
       }
     }
-    
-    this.stats.totalServices = this.services.size;
-    this.stats.totalInstances = totalInstances;
-    this.stats.healthyInstances = healthyInstances;
-    this.stats.unhealthyInstances = unhealthyInstances;
-    
-    // 计算每分钟的注册/注销率
-    const now = Date.now();
-    const oneMinuteAgo = now - 60000;
-    
-    const recentEvents = this.eventHistory.filter(event => event.timestamp > oneMinuteAgo);
-    this.stats.registrationsPerMinute = recentEvents.filter(e => e.type === 'service_registered').length;
-    this.stats.deregistrationsPerMinute = recentEvents.filter(e => e.type === 'service_deregistered').length;
   }
 
-  /**
-   * 获取统计信息
-   */
+  // Get service discovery statistics / 获取服务发现统计
   getStats(): ServiceDiscoveryStats {
-    this.updateStats();
     return { ...this.stats };
   }
 
-  /**
-   * 获取事件历史
-   */
-  getEventHistory(limit?: number): ServiceDiscoveryEvent[] {
-    const events = [...this.eventHistory].reverse(); // 最新的在前
-    return limit ? events.slice(0, limit) : events;
+  // Start service discovery / 启动服务发现
+  start(): void {
+    if (this.isRunning) {
+      return;
+    }
+    
+    this.isRunning = true;
+    console.log('Service Discovery started');
   }
 
-  /**
-   * 清理过期服务
-   */
-  cleanupExpiredServices(): number {
-    let cleanedCount = 0;
-    const now = Date.now();
-    const expireThreshold = 5 * 60 * 1000; // 5分钟
-    
-    for (const [serviceName, serviceInstances] of this.services) {
-      const expiredInstances: string[] = [];
-      
-      for (const [instanceId, registration] of serviceInstances) {
-        const lastCheck = registration.instance.lastHealthCheck || 0;
-        if (now - lastCheck > expireThreshold) {
-          expiredInstances.push(instanceId);
-        }
-      }
-      
-      for (const instanceId of expiredInstances) {
-        this.deregisterService(serviceName, instanceId);
-        cleanedCount++;
-      }
+  // Stop service discovery / 停止服务发现
+  async stop(): Promise<void> {
+    if (!this.isRunning) {
+      return;
     }
     
-    if (cleanedCount > 0) {
-      console.log(`Cleaned up ${cleanedCount} expired service instances`);
-    }
+    this.isRunning = false;
     
-    return cleanedCount;
-  }
-
-  /**
-   * 清理资源
-   */
-  async cleanup(): Promise<void> {
-    // 停止所有健康检查
-    for (const interval of this.healthCheckIntervals.values()) {
-      clearInterval(interval);
+    // Clear all health check timers / 清除所有健康检查定时器
+    for (const timer of Array.from(this.healthChecks.values())) {
+      clearInterval(timer);
     }
-    this.healthCheckIntervals.clear();
-    
-    // 清除所有TTL定时器
-    for (const timer of this.ttlTimers.values()) {
-      clearTimeout(timer);
-    }
-    this.ttlTimers.clear();
-    
-    // 清理数据
-    this.services.clear();
     this.healthChecks.clear();
-    this.eventHistory.length = 0;
-    this.removeAllListeners();
     
-    console.log('ServiceDiscovery cleaned up');
+    // Clear all services / 清除所有服务
+    this.services.clear();
+    
+    console.log('Service Discovery stopped');
+  }
+
+  // Check if service discovery is running / 检查服务发现是否正在运行
+  isActive(): boolean {
+    return this.isRunning;
   }
 }

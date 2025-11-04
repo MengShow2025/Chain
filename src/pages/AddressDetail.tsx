@@ -321,3 +321,5 @@ export const AddressDetail: React.FC = () => {
     </div>
   );
 };
+
+export default AddressDetail;

@@ -373,10 +373,6 @@ export class BlockValidator {
     
     // 0-gas费交易验证
     if (tx.isZeroGas) {
-      if (!tx.exchangeBatch && !tx.contractTier) {
-        return false;
-      }
-      
       if (tx.contractTier && (tx.contractTier < 1 || tx.contractTier > 3)) {
         return false;
       }

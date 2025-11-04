@@ -23,7 +23,7 @@ export class TitanChain {
   private blockValidator: BlockValidator;
   private zeroGasEngine: ZeroGasEngine;
   private performanceProcessor: HighPerformanceProcessor;
-  private microBatchScheduler?: any;
+
   
   private blockchain: Block[] = [];
   private currentBlock: Block | null = null;
@@ -43,7 +43,7 @@ export class TitanChain {
     networkHealth: 'excellent',
     averageBlockTime: CONSENSUS_CONFIG.BLOCK_TIME * 1000,
     zeroGasTransactions: 0,
-    exchangeBatchTransactions: 0
+
   };
   
   constructor() {
@@ -57,19 +57,7 @@ export class TitanChain {
     this.zeroGasEngine = new ZeroGasEngine();
     this.performanceProcessor = new HighPerformanceProcessor(this.transactionPool);
 
-    // 挂载微批调度器（按需启用）
-    try {
-      const { MicroBatchScheduler } = require('./micro-batch-scheduler.js');
-      const enableScheduler = (process.env.ENABLE_MICROBATCH ?? 'true').toLowerCase() !== 'false';
-      if (enableScheduler) {
-        this.microBatchScheduler = new MicroBatchScheduler(this.transactionPool, this.performanceProcessor);
-        console.log('MicroBatchScheduler initialized');
-      } else {
-        console.log('MicroBatchScheduler disabled by ENV ENABLE_MICROBATCH=false');
-      }
-    } catch (e) {
-      console.warn('MicroBatchScheduler not available:', e?.message || e);
-    }
+
     
     console.log('TitanChain initialized successfully');
   }
@@ -81,29 +69,35 @@ export class TitanChain {
     try {
       console.log('Starting TitanChain network...');
       
-      // 初始化各个组件
+      // 初始化各个组件 // 英文 /中文
       await this.consensusEngine.initialize(genesisValidators);
       await this.validatorManager.initialize(genesisValidators);
-      // EVMExecutor不需要初始化，构造函数已经设置了默认状态
+      // EVMExecutor不需要初始化，构造函数已经设置了默认状态 // 英文 /中文
       
-      // 创建创世区块
-      await this.createGenesisBlock();
+      // 根据环境变量决定是否创建创世区块 // 英文 /中文
+      const isBootstrap = (process.env.IS_BOOTSTRAP_NODE ?? 'false').toLowerCase() === 'true';
+      const joinExisting = (process.env.JOIN_EXISTING_NETWORK ?? 'false').toLowerCase() === 'true';
+      if (isBootstrap && !joinExisting) {
+        // 引导节点创建创世区块 // 英文 /中文
+        await this.createGenesisBlock();
+      } else {
+        // 非引导节点跳过创世，等待从网络同步 // 英文 /中文
+        console.log('Skipping genesis creation for non-bootstrap node; will join existing network / 非引导节点跳过创世，将加入现有网络');
+      }
       
-      // 启动区块生产（可通过环境变量禁用）
+      // 启动区块生产（可通过环境变量禁用），且需要有创世区块 // 英文 /中文
       const enableProduction = (process.env.ENABLE_BLOCK_PRODUCTION ?? 'true').toLowerCase() !== 'false';
-      if (enableProduction) {
+      const hasGenesis = !!this.currentBlock;
+      if (enableProduction && hasGenesis) {
         this.startBlockProduction();
       } else {
-        console.log('Block production disabled by ENV ENABLE_BLOCK_PRODUCTION=false');
-      }
-
-      // 启动微批调度器
-      if (this.microBatchScheduler) {
-        this.microBatchScheduler.start();
+        console.log('Block production disabled or no genesis available / 区块生产被禁用或尚无创世区块');
       }
       
-      // 启动验证节点选举
-      this.startValidatorElection();
+      // 启动验证节点选举（需要链已初始化） // 英文 /中文
+      if (hasGenesis) {
+        this.startValidatorElection();
+      }
       
       this.isRunning = true;
       console.log('TitanChain network started successfully');
@@ -127,14 +121,23 @@ export class TitanChain {
       this.blockProductionInterval = null;
     }
 
-    // 停止微批调度器
-    if (this.microBatchScheduler) {
-      try {
-        this.microBatchScheduler.stop();
-      } catch {}
-    }
+
     
     console.log('TitanChain network stopped');
+  }
+
+  /**
+   * 获取区块链数据（供同步模块读取） // 英文 /中文
+   */
+  getChain(): Block[] {
+    return [...this.blockchain];
+  }
+
+  /**
+   * 获取区块验证器实例（供BlockSyncProtocol使用） // 英文 /中文
+   */
+  getBlockValidator(): BlockValidator {
+    return this.blockValidator;
   }
   
   /**
@@ -183,6 +186,27 @@ export class TitanChain {
     }, blockTime);
     
     console.log(`Block production started with ${CONSENSUS_CONFIG.BLOCK_TIME}s interval`);
+  }
+
+  /**
+   * Enable block production after sync / 在同步完成后启用区块生产
+   * Public wrapper to allow starting production post-initialization // 英文 /中文
+   */
+  enableBlockProduction(): void {
+    const hasGenesis = !!this.currentBlock;
+    if (!hasGenesis) {
+      console.log('Cannot enable block production without genesis / 没有创世区块无法启用出块');
+      return;
+    }
+    if (this.blockProductionInterval) {
+      console.log('Block production already running / 区块生产已在运行');
+      return;
+    }
+    if (!this.isRunning) {
+      console.log('Blockchain not running, cannot start production / 区块链未运行，无法开始生产');
+      return;
+    }
+    this.startBlockProduction();
   }
   
   /**
@@ -677,9 +701,7 @@ export class TitanChain {
     const zeroGasCount = block.transactions.filter(tx => tx.isZeroGas).length;
     this.networkStats.zeroGasTransactions += zeroGasCount;
     
-    // 计算交易所批量交易数量
-    const exchangeBatchCount = block.transactions.filter(tx => tx.exchangeBatch).length;
-    this.networkStats.exchangeBatchTransactions += exchangeBatchCount;
+
     
     // 计算当前TPS
     if (this.networkStats.averageBlockTime > 0) {
@@ -746,22 +768,7 @@ export class TitanChain {
   /**
    * 获取微批调度器状态
    */
-  getMicroBatchStatus() {
-    try {
-      if (this.microBatchScheduler && typeof this.microBatchScheduler.getStatus === 'function') {
-        return this.microBatchScheduler.getStatus();
-      }
-    } catch (e) {
-      console.warn('Failed to get microBatch status:', e?.message || e);
-    }
-    return {
-      running: false,
-      intervalMs: 0,
-      maxOrdersPerBatch: 0,
-      maxPendingBatches: 0,
-      pendingBatchCount: 0
-    };
-  }
+
   
   /**
    * 批量提交交易
@@ -802,12 +809,7 @@ export class TitanChain {
     return { success, failed };
   }
   
-  /**
-   * 获取交易所批量状态
-   */
-  getExchangeBatchStatus(batchId: string) {
-    return this.zeroGasEngine.getBatchStatus(batchId);
-  }
+
   
   /**
    * 获取合约层级使用统计
@@ -859,7 +861,7 @@ export class TitanChain {
       performanceStats: this.getPerformanceStats(),
       performanceMetrics: this.getPerformanceMetrics(),
       queueStatus: this.getQueueStatus(),
-      microBatchStatus: this.getMicroBatchStatus()
+
     };
   }
 

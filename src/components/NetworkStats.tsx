@@ -35,11 +35,11 @@ export const NetworkStats: React.FC = () => {
     fetchNetworkMetrics();
     fetchNetworkHealth();
     
-    // 定期更新数据
+    // Periodically update data / 定期更新数据
     const interval = setInterval(() => {
       fetchNetworkMetrics();
       fetchNetworkHealth();
-    }, 30000); // 每30秒更新
+    }, 30000); // Update every 30 seconds / 每30秒更新
     
     return () => clearInterval(interval);
   }, [timeRange]);

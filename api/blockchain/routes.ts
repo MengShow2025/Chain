@@ -2,7 +2,7 @@ import express from 'express';
 
 const router = express.Router();
 
-// 区块链服务的基础URL
+// Base URL for blockchain service / 区块链服务的基础URL
 const BLOCKCHAIN_SERVICE_URL = process.env.BLOCKCHAIN_SERVICE_URL || 'http://localhost:3001';
 
 /**
@@ -18,6 +18,40 @@ async function proxyToBlockchainService(endpoint: string): Promise<any> {
     return { success: false, error: 'Failed to connect to blockchain service', status: 503 };
   }
 }
+
+/**
+ * 获取网络统计信息 / Get network statistics
+ */
+router.get('/stats', async (req, res) => {
+  try {
+    console.log('🔍 API: Getting network statistics...');
+    
+    // 模拟网络统计数据 / Mock network statistics data
+    const networkStats = {
+      blockHeight: 1234567 + Math.floor(Math.random() * 1000),
+      totalTransactions: 9876543 + Math.floor(Math.random() * 10000),
+      activeValidators: 108,
+      networkHashRate: '1.2 TH/s',
+      averageBlockTime: 2.1,
+      tps: 185432 + Math.floor(Math.random() * 50000),
+      zeroGasTransactions: 2345678 + Math.floor(Math.random() * 5000),
+      totalStaked: '50000000',
+      timestamp: Date.now()
+    };
+    
+    console.log('✅ API: Successfully generated network statistics');
+    res.json({
+      success: true,
+      data: networkStats
+    });
+  } catch (error) {
+    console.error('❌ API: Error getting network statistics:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
 
 /**
  * 获取当前出块节点信息

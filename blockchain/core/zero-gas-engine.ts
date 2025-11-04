@@ -1,21 +1,18 @@
-import { Transaction, ExchangeBatch } from '../../shared/types/blockchain.js';
-import { ZERO_GAS_CONFIG, PERFORMANCE_CONFIG } from '../../shared/constants/blockchain.js';
+import { Transaction } from '../../shared/types/blockchain.js';
+import { ZERO_GAS_CONFIG, PERFORMANCE_CONFIG, ZERO_GAS_LIMITS } from '../../shared/constants/blockchain.js';
 import { adaptiveBatchController } from '../../shared/utils/adaptive-batch.js';
 import { SponsorPoolService } from './sponsor-pool.js';
 
 /**
  * 0-gas费交易处理引擎
- * 实现交易所批量处理和智能合约分层收费机制
+ * 实现智能合约分层收费机制和原生代币0-gas费处理
  */
 export class ZeroGasEngine {
-  private exchangeBatches: Map<string, ExchangeBatch> = new Map();
   private contractTierUsage: Map<number, number> = new Map();
-  private dailyLimits: Map<string, { used: bigint; resetTime: number }> = new Map();
   
   // 性能统计
   private stats = {
     totalZeroGasTransactions: 0,
-    batchTransactions: 0,
     contractTierTransactions: 0,
     savedGasFees: BigInt(0),
     averageProcessingTime: 0
@@ -29,8 +26,8 @@ export class ZeroGasEngine {
       this.contractTierUsage.set(tier, 0);
     }
     
-    // 定期重置每日限额
-    setInterval(() => this.resetDailyLimits(), 24 * 60 * 60 * 1000);
+    // 定期重置层级使用统计
+    setInterval(() => this.resetTierUsage(), 3600000); // 每小时重置一次 // 英文 /中文
   }
   
   /**
@@ -40,21 +37,12 @@ export class ZeroGasEngine {
     const startTime = Date.now();
     
     try {
-      // 验证0-gas费交易条件
+      // 验证0-gas费交易条件 // 英文 /中文
       if (!this.validateZeroGasConditions(tx)) {
         return { success: false, reason: 'Invalid zero-gas conditions' };
       }
       
-      // 处理交易所批量交易
-      if (tx.exchangeBatch) {
-        const result = await this.processExchangeBatch(tx);
-        if (result.success) {
-          this.stats.batchTransactions++;
-        }
-        return result;
-      }
-      
-      // 处理智能合约分层交易
+      // 处理智能合约分层交易 // 英文 /中文
       if (tx.contractTier) {
         const result = await this.processContractTier(tx);
         if (result.success) {
@@ -63,13 +51,18 @@ export class ZeroGasEngine {
         return result;
       }
       
+      // 处理原生代币交易（完全免费） // 英文 /中文
+      if (this.isNativeTokenTransaction(tx)) {
+        return { success: true, reason: 'Native token transaction - zero gas' };
+      }
+      
       return { success: false, reason: 'No valid zero-gas mechanism specified' };
       
     } catch (error) {
       console.error('Error processing zero-gas transaction:', error);
       return { success: false, reason: 'Processing error' };
     } finally {
-      // 更新性能统计
+      // 更新性能统计 // 英文 /中文
       const processingTime = Date.now() - startTime;
       this.stats.averageProcessingTime = 
         (this.stats.averageProcessingTime * this.stats.totalZeroGasTransactions + processingTime) / 
@@ -80,84 +73,14 @@ export class ZeroGasEngine {
   }
   
   /**
-   * 处理交易所批量交易
+   * 检查是否为原生代币交易
    */
-  private async processExchangeBatch(tx: Transaction): Promise<{ success: boolean; reason?: string }> {
-    if (!tx.exchangeBatch) {
-      return { success: false, reason: 'No exchange batch information' };
-    }
-    
-    const { batchId, exchangeId } = tx.exchangeBatch;
-    
-    // 验证交易所权限
-    if (!this.validateExchangePermission(exchangeId)) {
-      return { success: false, reason: 'Exchange not authorized for zero-gas transactions' };
-    }
-    
-    // 获取或创建批量记录
-    let batch = this.exchangeBatches.get(batchId);
-    if (!batch) {
-      batch = {
-        batchId,
-        exchangeId,
-        transactions: [],
-        totalTransactions: 0,
-        totalVolume: BigInt(0),
-        timestamp: Date.now(),
-        createdAt: Date.now(),
-        status: 'pending'
-      };
-      this.exchangeBatches.set(batchId, batch);
-    }
-    
-    // 验证批量限制
-    if (batch.transactions.length >= ZERO_GAS_CONFIG.MAX_BATCH_SIZE) {
-      return { success: false, reason: 'Batch size limit exceeded' };
-    }
-    
-    // 验证交易量限制
-    const newTotalVolume = batch.totalVolume + tx.value;
-    if (newTotalVolume > ZERO_GAS_CONFIG.MAX_BATCH_VOLUME) {
-      return { success: false, reason: 'Batch volume limit exceeded' };
-    }
-    
-    // 验证每日限额
-    if (!this.checkDailyLimit(exchangeId, tx.value)) {
-      return { success: false, reason: 'Daily limit exceeded' };
-    }
-
-    // 赞助池扣费资格检查与扣费（按gas单位）
-    const sponsorCheck = SponsorPoolService.canSponsor(exchangeId, tx.gas);
-    if (!sponsorCheck.ok) {
-      return { success: false, reason: `Sponsor rejected: ${sponsorCheck.reason}` };
-    }
-    const sponsorDeduct = SponsorPoolService.deduct(exchangeId, tx.gas);
-    if (!sponsorDeduct.ok) {
-      return { success: false, reason: `Sponsor deduct failed: ${sponsorDeduct.reason}` };
-    }
-    
-    // 添加交易到批量
-    batch.transactions.push(tx.hash);
-    batch.totalTransactions += 1;
-    batch.totalVolume = newTotalVolume;
-    
-    // 更新每日使用量
-    this.updateDailyUsage(exchangeId, tx.value);
-    
-    // 检查是否达到批量处理阈值（自适应）
-    const { sizeThreshold, volumeThreshold } = adaptiveBatchController.update(0, this.exchangeBatches.size);
-    if (batch.transactions.length >= sizeThreshold ||
-        batch.totalVolume >= volumeThreshold) {
-      batch.status = 'ready';
-      console.log(`Exchange batch ${batchId} is ready for processing`);
-    }
-    
-    // 计算节省的gas费用
-    const savedGas = tx.gas * tx.gasPrice;
-    this.stats.savedGasFees += savedGas;
-    
-    console.log(`Processed exchange batch transaction ${tx.hash} for exchange ${exchangeId}`);
-    return { success: true };
+  private isNativeTokenTransaction(tx: Transaction): boolean {
+    // 原生代币交易的特征： // 英文 /中文
+    // 1. data字段为空或只包含简单数据
+    // 2. to地址不是合约地址
+    // 3. 交易类型为简单转账
+    return tx.data === '0x' || tx.data === '' || tx.data.length <= 10;
   }
   
   /**
@@ -170,34 +93,34 @@ export class ZeroGasEngine {
     
     const tier = tx.contractTier;
     
-    // 验证层级范围
+    // 验证层级范围 // 英文 /中文
     if (tier < 1 || tier > 3) {
       return { success: false, reason: 'Invalid contract tier' };
     }
     
-    // 获取层级配置
+    // 获取层级配置 // 英文 /中文
     const tierConfig = ZERO_GAS_CONFIG.CONTRACT_TIER_FEES[tier];
     if (!tierConfig) {
       return { success: false, reason: 'Tier configuration not found' };
     }
     
-    // 验证gas限制
+    // 验证gas限制 // 英文 /中文
     if (tx.gas > tierConfig.maxGas) {
       return { success: false, reason: `Gas limit ${tx.gas} exceeds tier ${tier} maximum ${tierConfig.maxGas}` };
     }
     
-    // 验证合约调用复杂度
+    // 验证合约调用复杂度 // 英文 /中文
     if (!this.validateContractComplexity(tx, tier)) {
       return { success: false, reason: 'Contract call too complex for tier' };
     }
     
-    // 验证层级使用限制
+    // 验证层级使用限制 // 英文 /中文
     const currentUsage = this.contractTierUsage.get(tier) || 0;
     if (currentUsage >= tierConfig.dailyLimit) {
       return { success: false, reason: `Tier ${tier} daily limit exceeded` };
     }
 
-    // 赞助池扣费资格检查与扣费：按目标合约地址作为赞助账户
+    // 赞助池扣费资格检查与扣费：按目标合约地址作为赞助账户 // 英文 /中文
     const sponsorAccount = tx.to;
     const sponsorCheck = SponsorPoolService.canSponsor(sponsorAccount, tx.gas);
     if (!sponsorCheck.ok) {
@@ -208,10 +131,10 @@ export class ZeroGasEngine {
       return { success: false, reason: `Sponsor deduct failed: ${sponsorDeduct.reason}` };
     }
     
-    // 更新层级使用统计
+    // 更新层级使用统计 // 英文 /中文
     this.contractTierUsage.set(tier, currentUsage + 1);
     
-    // 计算节省的gas费用
+    // 计算节省的gas费用 // 英文 /中文
     const savedGas = tx.gas * tx.gasPrice;
     this.stats.savedGasFees += savedGas;
     
@@ -223,22 +146,22 @@ export class ZeroGasEngine {
    * 验证0-gas费交易条件
    */
   private validateZeroGasConditions(tx: Transaction): boolean {
-    // 必须标记为0-gas费交易
+    // 必须标记为0-gas费交易 // 英文 /中文
     if (!tx.isZeroGas) {
       return false;
     }
     
-    // 必须有批量ID或合约层级
-    if (!tx.exchangeBatch && !tx.contractTier) {
+    // 必须有合约层级或为原生代币交易 // 英文 /中文
+    if (!tx.contractTier && !this.isNativeTokenTransaction(tx)) {
       return false;
     }
     
-    // 验证交易基本信息
+    // 验证交易基本信息 // 英文 /中文
     if (!tx.hash || !tx.from || !tx.to) {
       return false;
     }
     
-    // 验证gas价格为0
+    // 验证gas价格为0 // 英文 /中文
     if (tx.gasPrice !== BigInt(0)) {
       return false;
     }
@@ -247,72 +170,24 @@ export class ZeroGasEngine {
   }
   
   /**
-   * 验证交易所权限
-   */
-  private validateExchangePermission(exchangeId: string): boolean {
-    // 检查交易所是否在白名单中
-    const authorizedExchanges = ZERO_GAS_CONFIG.AUTHORIZED_EXCHANGES || [];
-    return authorizedExchanges.includes(exchangeId);
-  }
-  
-  /**
    * 验证合约调用复杂度
    */
   private validateContractComplexity(tx: Transaction, tier: number): boolean {
-    // 根据层级验证合约调用复杂度
+    // 根据层级验证合约调用复杂度 // 英文 /中文
     const dataSize = tx.data.length;
     
     switch (tier) {
       case 1: // 基础层：简单转账和基础合约调用
-        return dataSize <= 1024; // 1KB数据限制
+        return dataSize <= 1024; // 1KB数据限制 // 英文 /中文
         
       case 2: // 标准层：中等复杂度合约调用
-        return dataSize <= 4096; // 4KB数据限制
+        return dataSize <= 4096; // 4KB数据限制 // 英文 /中文
         
       case 3: // 高级层：复杂合约调用
-        return dataSize <= 16384; // 16KB数据限制
+        return dataSize <= 16384; // 16KB数据限制 // 英文 /中文
         
       default:
         return false;
-    }
-  }
-  
-  /**
-   * 检查每日限额
-   */
-  private checkDailyLimit(exchangeId: string, amount: bigint): boolean {
-    const limit = this.dailyLimits.get(exchangeId);
-    const maxDaily = ZERO_GAS_CONFIG.DAILY_VOLUME_LIMIT;
-    
-    if (!limit) {
-      return amount <= maxDaily;
-    }
-    
-    // 检查是否需要重置
-    if (Date.now() > limit.resetTime) {
-      this.dailyLimits.set(exchangeId, {
-        used: amount,
-        resetTime: this.getNextResetTime()
-      });
-      return true;
-    }
-    
-    return limit.used + amount <= maxDaily;
-  }
-  
-  /**
-   * 更新每日使用量
-   */
-  private updateDailyUsage(exchangeId: string, amount: bigint): void {
-    const limit = this.dailyLimits.get(exchangeId);
-    
-    if (!limit || Date.now() > limit.resetTime) {
-      this.dailyLimits.set(exchangeId, {
-        used: amount,
-        resetTime: this.getNextResetTime()
-      });
-    } else {
-      limit.used += amount;
     }
   }
   
@@ -328,56 +203,15 @@ export class ZeroGasEngine {
   }
   
   /**
-   * 重置每日限额
+   * 重置合约层级使用统计
    */
-  private resetDailyLimits(): void {
-    const now = Date.now();
-    
-    for (const [exchangeId, limit] of this.dailyLimits) {
-      if (now > limit.resetTime) {
-        this.dailyLimits.set(exchangeId, {
-          used: BigInt(0),
-          resetTime: this.getNextResetTime()
-        });
-      }
-    }
-    
-    // 重置合约层级使用统计
+  private resetTierUsage(): void {
+    // 重置合约层级使用统计 // 英文 /中文
     for (let tier = 1; tier <= 3; tier++) {
       this.contractTierUsage.set(tier, 0);
     }
     
-    console.log('Daily limits reset');
-  }
-  
-  /**
-   * 获取批量处理状态
-   */
-  getBatchStatus(batchId: string): ExchangeBatch | null {
-    return this.exchangeBatches.get(batchId) || null;
-  }
-  
-  /**
-   * 获取就绪的批量
-   */
-  getReadyBatches(): ExchangeBatch[] {
-    return Array.from(this.exchangeBatches.values())
-      .filter(batch => batch.status === 'ready');
-  }
-  
-  /**
-   * 标记批量为已处理
-   */
-  markBatchProcessed(batchId: string): void {
-    const batch = this.exchangeBatches.get(batchId);
-    if (batch) {
-      batch.status = 'processed';
-      
-      // 清理旧批量记录
-      setTimeout(() => {
-        this.exchangeBatches.delete(batchId);
-      }, 60000); // 1分钟后清理
-    }
+    console.log('Tier usage reset');
   }
   
   /**
@@ -388,31 +222,33 @@ export class ZeroGasEngine {
   }
   
   /**
-   * 获取每日限额使用情况
-   */
-  getDailyLimitUsage(exchangeId: string): { used: bigint; limit: bigint; resetTime: number } | null {
-    const limit = this.dailyLimits.get(exchangeId);
-    if (!limit) {
-      return null;
-    }
-    
-    return {
-      used: limit.used,
-      limit: ZERO_GAS_CONFIG.DAILY_VOLUME_LIMIT,
-      resetTime: limit.resetTime
-    };
-  }
-  
-  /**
    * 获取引擎统计信息
    */
   getEngineStats() {
     return {
       ...this.stats,
-      activeBatches: this.exchangeBatches.size,
-      readyBatches: this.getReadyBatches().length,
+      tierUsage: Object.fromEntries(this.contractTierUsage)
+    };
+  }
+  
+  /**
+   * 获取每日限额使用情况（与赞助池联动） // 英文 /中文
+   */
+  getDailyLimitUsage(exchangeId: string) {
+    // 从赞助池读取账户的每日使用情况 // 英文 /中文
+    const pool = SponsorPoolService.getPool(exchangeId);
+    return {
+      exchangeId: exchangeId.toLowerCase(),
       tierUsage: Object.fromEntries(this.contractTierUsage),
-      dailyLimitsCount: this.dailyLimits.size
+      sponsorUsage: {
+        dailyGasUsed: pool.dailyGasUsed,
+        dailyTxCount: pool.dailyTxCount,
+        resetTime: pool.resetTime
+      },
+      limits: {
+        maxDailyGas: ZERO_GAS_LIMITS.MAX_SPONSORED_GAS_PER_DAY,
+        maxDailyTx: ZERO_GAS_LIMITS.MAX_SPONSORED_TX_PER_DAY
+      }
     };
   }
   
@@ -439,18 +275,10 @@ export class ZeroGasEngine {
       return { eligible: false, reason: 'Transaction not marked as zero-gas' };
     }
     
-    if (tx.exchangeBatch) {
-      const exchangeId = tx.exchangeBatch.exchangeId;
-      
-      if (!this.validateExchangePermission(exchangeId)) {
-        return { eligible: false, reason: 'Exchange not authorized' };
-      }
-      
-      if (!this.checkDailyLimit(exchangeId, tx.value)) {
-        return { eligible: false, reason: 'Daily limit exceeded' };
-      }
-      // 赞助池资格检查（按gas单位）
-      const sponsorCheck = SponsorPoolService.canSponsor(exchangeId, tx.gas);
+    // 检查原生代币交易 // 英文 /中文
+    if (this.isNativeTokenTransaction(tx)) {
+      // 赞助池资格检查 // 英文 /中文
+      const sponsorCheck = SponsorPoolService.canSponsor(tx.from, tx.gas);
       if (!sponsorCheck.ok) {
         return { eligible: false, reason: `Sponsor rejected: ${sponsorCheck.reason}` };
       }
@@ -458,6 +286,7 @@ export class ZeroGasEngine {
       return { eligible: true };
     }
     
+    // 检查合约层级交易 // 英文 /中文
     if (tx.contractTier) {
       const tier = tx.contractTier;
       const tierConfig = ZERO_GAS_CONFIG.CONTRACT_TIER_FEES[tier];
@@ -474,7 +303,8 @@ export class ZeroGasEngine {
       if (currentUsage >= tierConfig.dailyLimit) {
         return { eligible: false, reason: 'Tier daily limit exceeded' };
       }
-      // 赞助池资格检查：以合约地址作为赞助账户
+      
+      // 赞助池资格检查：以合约地址作为赞助账户 // 英文 /中文
       const sponsorCheck = SponsorPoolService.canSponsor(tx.to, tx.gas);
       if (!sponsorCheck.ok) {
         return { eligible: false, reason: `Sponsor rejected: ${sponsorCheck.reason}` };
@@ -483,6 +313,6 @@ export class ZeroGasEngine {
       return { eligible: true };
     }
     
-    return { eligible: false, reason: 'No valid zero-gas mechanism' };
+    return { eligible: false, reason: 'No valid zero-gas condition found' };
   }
 }

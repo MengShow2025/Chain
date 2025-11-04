@@ -1,0 +1,111 @@
+services:
+  # TitanChain主应用
+  titanchain:
+    build: .
+    ports:
+      - "3000:3000"  # 前端
+      - "8080:8080"  # 后端API
+    environment:
+      - NODE_ENV=production
+      - REDIS_URL=redis://redis:6379
+      - POSTGRES_URL=postgresql://titanchain:titanchain_password@postgres:5432/titanchain
+      - TITAN_NETWORK_ID=mainnet
+      - TITAN_CONSENSUS_MODE=bft
+      - TITAN_SHARDING_ENABLED=true
+      - TITAN_MAX_TPS=500000
+      - TITAN_TARGET_LATENCY=0.1
+    depends_on:
+      - redis
+      - postgres
+    restart: unless-stopped
+    networks:
+      - titanchain-network
+
+  # Redis缓存服务
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru
+    restart: unless-stopped
+    networks:
+      - titanchain-network
+
+  # PostgreSQL数据库
+  postgres:
+    image: postgres:15-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=titanchain
+      - POSTGRES_USER=titanchain
+      - POSTGRES_PASSWORD=titanchain_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+    networks:
+      - titanchain-network
+
+  # Nginx反向代理
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf
+      - ./ssl:/etc/nginx/ssl
+    depends_on:
+      - titanchain
+    restart: unless-stopped
+    networks:
+      - titanchain-network
+
+  # 监控服务 - Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+    networks:
+      - titanchain-network
+
+  # 监控服务 - Grafana
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=titanchain_admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - titanchain-network
+
+volumes:
+  redis_data:
+  postgres_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  titanchain-network:
+    driver: bridge

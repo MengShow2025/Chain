@@ -137,7 +137,7 @@ class NativeTokenHandlingTest {
       transactionIndex: 0,
       status: 'confirmed',
       isZeroGas: false,
-      exchangeBatchInfo: null,
+
       contractTierLevel: null
     };
 

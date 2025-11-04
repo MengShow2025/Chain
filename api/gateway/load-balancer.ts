@@ -1,8 +1,7 @@
+// Load Balancer implementation for service distribution / 服务分发的负载均衡器实现
 import { EventEmitter } from 'events';
 
-/**
- * 服务实例接口
- */
+// Service instance interface / 服务实例接口
 export interface ServiceInstance {
   id: string;
   host: string;
@@ -10,16 +9,14 @@ export interface ServiceInstance {
   protocol: 'http' | 'https';
   weight: number;
   status: ServiceStatus;
-  healthCheckUrl?: string;
-  metadata?: ServiceMetadata;
-  lastHealthCheck?: number;
-  responseTime?: number;
-  errorCount?: number;
+  metadata: ServiceMetadata;
+  healthScore: number;
+  lastHealthCheck: number;
+  connections: number;
+  responseTime: number;
 }
 
-/**
- * 服务状态枚举
- */
+// Service status enum / 服务状态枚举
 export enum ServiceStatus {
   HEALTHY = 'healthy',
   UNHEALTHY = 'unhealthy',
@@ -27,287 +24,284 @@ export enum ServiceStatus {
   UNKNOWN = 'unknown'
 }
 
-/**
- * 服务元数据
- */
+// Service metadata interface / 服务元数据接口
 export interface ServiceMetadata {
   version: string;
-  region?: string;
-  zone?: string;
-  tags?: string[];
-  capabilities?: string[];
+  region: string;
+  zone: string;
+  tags: string[];
+  capabilities: string[];
 }
 
-/**
- * 负载均衡策略
- */
-export enum LoadBalancingStrategy {
+// Load balancing strategies / 负载均衡策略
+export enum LoadBalanceStrategy {
   ROUND_ROBIN = 'round_robin',
   WEIGHTED_ROUND_ROBIN = 'weighted_round_robin',
   LEAST_CONNECTIONS = 'least_connections',
-  LEAST_RESPONSE_TIME = 'least_response_time',
+  WEIGHTED_LEAST_CONNECTIONS = 'weighted_least_connections',
+  RANDOM = 'random',
+  WEIGHTED_RANDOM = 'weighted_random',
   IP_HASH = 'ip_hash',
-  RANDOM = 'random'
+  LEAST_RESPONSE_TIME = 'least_response_time',
+  HEALTH_BASED = 'health_based'
 }
 
-/**
- * 负载均衡配置
- */
+// Load balancer configuration / 负载均衡器配置
 export interface LoadBalancerConfig {
-  strategy: LoadBalancingStrategy;
+  strategy: LoadBalanceStrategy;
   healthCheckInterval: number;
-  healthCheckTimeout: number;
   maxRetries: number;
   retryDelay: number;
+  sessionAffinity: boolean;
+  stickySessionTtl: number;
+  circuitBreakerEnabled: boolean;
   circuitBreakerThreshold: number;
   circuitBreakerTimeout: number;
 }
 
-/**
- * 请求上下文
- */
+// Request context for load balancing / 负载均衡的请求上下文
 export interface RequestContext {
   clientIp: string;
-  userAgent?: string;
   sessionId?: string;
-  headers?: { [key: string]: string };
+  headers: Record<string, string>;
+  path: string;
+  method: string;
+  timestamp: number;
 }
 
-/**
- * 负载均衡结果
- */
-export interface LoadBalancingResult {
-  instance: ServiceInstance | null;
-  error?: string;
-  retryAfter?: number;
-}
-
-/**
- * 负载均衡器统计信息
- */
+// Load balancer statistics / 负载均衡器统计
 export interface LoadBalancerStats {
   totalRequests: number;
   successfulRequests: number;
   failedRequests: number;
   averageResponseTime: number;
   activeConnections: number;
-  healthyInstances: number;
-  unhealthyInstances: number;
+  instanceStats: Map<string, InstanceStats>;
 }
 
-/**
- * 负载均衡器类
- */
-export class LoadBalancer extends EventEmitter {
-  private config: LoadBalancerConfig;
-  private instances: Map<string, ServiceInstance>;
-  private roundRobinIndex: number;
-  private connectionCounts: Map<string, number>;
-  private circuitBreakers: Map<string, CircuitBreaker>;
-  private stats: LoadBalancerStats;
-  private healthCheckInterval: NodeJS.Timeout | null;
+// Instance statistics / 实例统计
+export interface InstanceStats {
+  requests: number;
+  successes: number;
+  failures: number;
+  averageResponseTime: number;
+  connections: number;
+  lastUsed: number;
+}
 
-  constructor(config: Partial<LoadBalancerConfig> = {}) {
+// Circuit breaker state / 断路器状态
+export enum CircuitState {
+  CLOSED = 'closed',
+  OPEN = 'open',
+  HALF_OPEN = 'half_open'
+}
+
+// Circuit breaker for instance / 实例断路器
+interface CircuitBreaker {
+  state: CircuitState;
+  failures: number;
+  lastFailureTime: number;
+  nextAttemptTime: number;
+}
+
+// Main Load Balancer class / 主要负载均衡器类
+export class LoadBalancer extends EventEmitter {
+  private instances: Map<string, ServiceInstance> = new Map();
+  private config: LoadBalancerConfig;
+  private stats: LoadBalancerStats;
+  private roundRobinIndex = 0;
+  private stickySessions: Map<string, string> = new Map();
+  private circuitBreakers: Map<string, CircuitBreaker> = new Map();
+  private healthCheckTimer?: NodeJS.Timeout;
+
+  constructor(config: LoadBalancerConfig) {
     super();
-    
-    this.config = {
-      strategy: LoadBalancingStrategy.ROUND_ROBIN,
-      healthCheckInterval: 30000, // 30秒
-      healthCheckTimeout: 5000,   // 5秒
-      maxRetries: 3,
-      retryDelay: 1000,
-      circuitBreakerThreshold: 5,
-      circuitBreakerTimeout: 60000, // 1分钟
-      ...config
-    };
-    
-    this.instances = new Map();
-    this.roundRobinIndex = 0;
-    this.connectionCounts = new Map();
-    this.circuitBreakers = new Map();
-    this.healthCheckInterval = null;
-    
+    this.config = { ...config };
     this.stats = {
       totalRequests: 0,
       successfulRequests: 0,
       failedRequests: 0,
       averageResponseTime: 0,
       activeConnections: 0,
-      healthyInstances: 0,
-      unhealthyInstances: 0
+      instanceStats: new Map()
     };
-    
-    console.log('LoadBalancer initialized with strategy:', this.config.strategy);
+
     this.startHealthChecks();
   }
 
-  /**
-   * 注册服务实例
-   */
-  registerInstance(instance: ServiceInstance): void {
-    this.instances.set(instance.id, {
-      ...instance,
-      status: ServiceStatus.UNKNOWN,
-      lastHealthCheck: 0,
-      responseTime: 0,
-      errorCount: 0
+  // Add service instance / 添加服务实例
+  addInstance(instance: ServiceInstance): void {
+    this.instances.set(instance.id, { ...instance });
+    
+    // Initialize instance stats / 初始化实例统计
+    this.stats.instanceStats.set(instance.id, {
+      requests: 0,
+      successes: 0,
+      failures: 0,
+      averageResponseTime: 0,
+      connections: 0,
+      lastUsed: 0
     });
-    
-    this.connectionCounts.set(instance.id, 0);
-    this.circuitBreakers.set(instance.id, new CircuitBreaker(
-      this.config.circuitBreakerThreshold,
-      this.config.circuitBreakerTimeout
-    ));
-    
-    console.log(`Service instance registered: ${instance.id} (${instance.host}:${instance.port})`);
-    this.emit('instance:registered', instance);
-    
-    // 立即进行健康检查
-    this.performHealthCheck(instance.id);
+
+    // Initialize circuit breaker / 初始化断路器
+    if (this.config.circuitBreakerEnabled) {
+      this.circuitBreakers.set(instance.id, {
+        state: CircuitState.CLOSED,
+        failures: 0,
+        lastFailureTime: 0,
+        nextAttemptTime: 0
+      });
+    }
+
+    console.log(`Load balancer: Instance added ${instance.id} (${instance.host}:${instance.port})`);
+    this.emit('instance_added', instance);
   }
 
-  /**
-   * 注销服务实例
-   */
-  unregisterInstance(instanceId: string): boolean {
+  // Remove service instance / 移除服务实例
+  removeInstance(instanceId: string): void {
     const instance = this.instances.get(instanceId);
-    if (!instance) {
-      return false;
-    }
-    
-    this.instances.delete(instanceId);
-    this.connectionCounts.delete(instanceId);
-    this.circuitBreakers.delete(instanceId);
-    
-    console.log(`Service instance unregistered: ${instanceId}`);
-    this.emit('instance:unregistered', instance);
-    
-    return true;
-  }
+    if (instance) {
+      this.instances.delete(instanceId);
+      this.stats.instanceStats.delete(instanceId);
+      this.circuitBreakers.delete(instanceId);
+      
+      // Remove sticky sessions for this instance / 移除此实例的粘性会话
+        const sessionsToDelete: string[] = [];
+        this.stickySessions.forEach((id, sessionId) => {
+          if (id === instanceId) {
+            sessionsToDelete.push(sessionId);
+          }
+        });
+        sessionsToDelete.forEach(sessionId => this.stickySessions.delete(sessionId));
 
-  /**
-   * 选择服务实例
-   */
-  selectInstance(context?: RequestContext): LoadBalancingResult {
-    this.stats.totalRequests++;
-    
-    const healthyInstances = this.getHealthyInstances();
-    
-    if (healthyInstances.length === 0) {
-      this.stats.failedRequests++;
-      return {
-        instance: null,
-        error: 'No healthy instances available',
-        retryAfter: 30000
-      };
-    }
-    
-    let selectedInstance: ServiceInstance | null = null;
-    
-    try {
-      switch (this.config.strategy) {
-        case LoadBalancingStrategy.ROUND_ROBIN:
-          selectedInstance = this.selectRoundRobin(healthyInstances);
-          break;
-        case LoadBalancingStrategy.WEIGHTED_ROUND_ROBIN:
-          selectedInstance = this.selectWeightedRoundRobin(healthyInstances);
-          break;
-        case LoadBalancingStrategy.LEAST_CONNECTIONS:
-          selectedInstance = this.selectLeastConnections(healthyInstances);
-          break;
-        case LoadBalancingStrategy.LEAST_RESPONSE_TIME:
-          selectedInstance = this.selectLeastResponseTime(healthyInstances);
-          break;
-        case LoadBalancingStrategy.IP_HASH:
-          selectedInstance = this.selectIpHash(healthyInstances, context?.clientIp || '');
-          break;
-        case LoadBalancingStrategy.RANDOM:
-          selectedInstance = this.selectRandom(healthyInstances);
-          break;
-        default:
-          selectedInstance = this.selectRoundRobin(healthyInstances);
-      }
-      
-      if (selectedInstance) {
-        // 检查熔断器状态
-        const circuitBreaker = this.circuitBreakers.get(selectedInstance.id);
-        if (circuitBreaker && circuitBreaker.isOpen()) {
-          return {
-            instance: null,
-            error: 'Circuit breaker is open',
-            retryAfter: circuitBreaker.getRetryAfter()
-          };
-        }
-        
-        // 增加连接计数
-        const currentConnections = this.connectionCounts.get(selectedInstance.id) || 0;
-        this.connectionCounts.set(selectedInstance.id, currentConnections + 1);
-        this.stats.activeConnections++;
-        
-        this.stats.successfulRequests++;
-        this.emit('instance:selected', selectedInstance);
-      }
-      
-      return { instance: selectedInstance };
-      
-    } catch (error) {
-      this.stats.failedRequests++;
-      return {
-        instance: null,
-        error: error instanceof Error ? error.message : 'Unknown selection error'
-      };
+      console.log(`Load balancer: Instance removed ${instanceId}`);
+      this.emit('instance_removed', instance);
     }
   }
 
-  /**
-   * 释放连接
-   */
-  releaseConnection(instanceId: string, responseTime?: number, success: boolean = true): void {
-    const currentConnections = this.connectionCounts.get(instanceId) || 0;
-    if (currentConnections > 0) {
-      this.connectionCounts.set(instanceId, currentConnections - 1);
-      this.stats.activeConnections--;
-    }
-    
+  // Update instance status / 更新实例状态
+  updateInstanceStatus(instanceId: string, status: ServiceStatus, healthScore?: number): void {
     const instance = this.instances.get(instanceId);
-    if (instance && responseTime !== undefined) {
-      // 更新响应时间（指数移动平均）
-      const alpha = 0.1;
-      instance.responseTime = instance.responseTime! * (1 - alpha) + responseTime * alpha;
-      
-      // 更新平均响应时间统计
-      this.updateAverageResponseTime(responseTime);
-    }
-    
-    // 更新熔断器状态
-    const circuitBreaker = this.circuitBreakers.get(instanceId);
-    if (circuitBreaker) {
-      if (success) {
-        circuitBreaker.recordSuccess();
-      } else {
-        circuitBreaker.recordFailure();
-        if (instance) {
-          instance.errorCount = (instance.errorCount || 0) + 1;
-        }
+    if (instance) {
+      instance.status = status;
+      if (healthScore !== undefined) {
+        instance.healthScore = healthScore;
       }
+      instance.lastHealthCheck = Date.now();
+
+      console.log(`Load balancer: Instance ${instanceId} status updated to ${status}`);
+      this.emit('instance_status_changed', { instanceId, status, healthScore });
     }
-    
-    this.emit('connection:released', { instanceId, responseTime, success });
   }
 
-  /**
-   * 轮询策略
-   */
-  private selectRoundRobin(instances: ServiceInstance[]): ServiceInstance {
+  // Get next instance for request / 获取请求的下一个实例
+  getNextInstance(context: RequestContext): ServiceInstance | null {
+    const availableInstances = this.getAvailableInstances();
+    
+    if (availableInstances.length === 0) {
+      console.warn('Load balancer: No available instances');
+      return null;
+    }
+
+    // Check for sticky session / 检查粘性会话
+     if (this.config.sessionAffinity && context.sessionId) {
+       const stickyInstanceId = this.stickySessions.get(context.sessionId);
+       if (stickyInstanceId) {
+         const stickyInstance = availableInstances.find(i => i.id === stickyInstanceId);
+         if (stickyInstance) {
+           return stickyInstance;
+         } else {
+           // Remove invalid sticky session / 移除无效的粘性会话
+           this.stickySessions.delete(context.sessionId);
+         }
+       }
+     }
+
+    let selectedInstance: ServiceInstance;
+
+    // Apply load balancing strategy / 应用负载均衡策略
+    switch (this.config.strategy) {
+      case LoadBalanceStrategy.ROUND_ROBIN:
+        selectedInstance = this.roundRobinSelect(availableInstances);
+        break;
+      case LoadBalanceStrategy.WEIGHTED_ROUND_ROBIN:
+        selectedInstance = this.weightedRoundRobinSelect(availableInstances);
+        break;
+      case LoadBalanceStrategy.LEAST_CONNECTIONS:
+        selectedInstance = this.leastConnectionsSelect(availableInstances);
+        break;
+      case LoadBalanceStrategy.WEIGHTED_LEAST_CONNECTIONS:
+        selectedInstance = this.weightedLeastConnectionsSelect(availableInstances);
+        break;
+      case LoadBalanceStrategy.RANDOM:
+        selectedInstance = this.randomSelect(availableInstances);
+        break;
+      case LoadBalanceStrategy.WEIGHTED_RANDOM:
+        selectedInstance = this.weightedRandomSelect(availableInstances);
+        break;
+      case LoadBalanceStrategy.IP_HASH:
+        selectedInstance = this.ipHashSelect(availableInstances, context.clientIp);
+        break;
+      case LoadBalanceStrategy.LEAST_RESPONSE_TIME:
+        selectedInstance = this.leastResponseTimeSelect(availableInstances);
+        break;
+      case LoadBalanceStrategy.HEALTH_BASED:
+        selectedInstance = this.healthBasedSelect(availableInstances);
+        break;
+      default:
+        selectedInstance = this.roundRobinSelect(availableInstances);
+    }
+
+    // Set sticky session if enabled / 如果启用则设置粘性会话
+     if (this.config.sessionAffinity && context.sessionId) {
+       this.stickySessions.set(context.sessionId, selectedInstance.id);
+       
+       // Set TTL for sticky session / 为粘性会话设置TTL
+       setTimeout(() => {
+         this.stickySessions.delete(context.sessionId!);
+       }, this.config.stickySessionTtl);
+     }
+
+    return selectedInstance;
+  }
+
+  // Get available instances (healthy and not circuit broken) / 获取可用实例（健康且未断路）
+  private getAvailableInstances(): ServiceInstance[] {
+    const now = Date.now();
+    return Array.from(this.instances.values()).filter(instance => {
+      // Check health status / 检查健康状态
+      if (instance.status !== ServiceStatus.HEALTHY) {
+        return false;
+      }
+
+      // Check circuit breaker / 检查断路器
+      if (this.config.circuitBreakerEnabled) {
+        const breaker = this.circuitBreakers.get(instance.id);
+        if (breaker) {
+          if (breaker.state === CircuitState.OPEN) {
+            if (now < breaker.nextAttemptTime) {
+              return false;
+            } else {
+              // Move to half-open state / 转换到半开状态
+              breaker.state = CircuitState.HALF_OPEN;
+            }
+          }
+        }
+      }
+
+      return true;
+    });
+  }
+
+  // Round robin selection / 轮询选择
+  private roundRobinSelect(instances: ServiceInstance[]): ServiceInstance {
     const instance = instances[this.roundRobinIndex % instances.length];
     this.roundRobinIndex = (this.roundRobinIndex + 1) % instances.length;
     return instance;
   }
 
-  /**
-   * 加权轮询策略
-   */
-  private selectWeightedRoundRobin(instances: ServiceInstance[]): ServiceInstance {
+  // Weighted round robin selection / 加权轮询选择
+  private weightedRoundRobinSelect(instances: ServiceInstance[]): ServiceInstance {
     const totalWeight = instances.reduce((sum, instance) => sum + instance.weight, 0);
     let randomWeight = Math.random() * totalWeight;
     
@@ -318,335 +312,322 @@ export class LoadBalancer extends EventEmitter {
       }
     }
     
-    return instances[0]; // 回退到第一个实例
+    return instances[0];
   }
 
-  /**
-   * 最少连接策略
-   */
-  private selectLeastConnections(instances: ServiceInstance[]): ServiceInstance {
-    let minConnections = Infinity;
-    let selectedInstance = instances[0];
-    
-    for (const instance of instances) {
-      const connections = this.connectionCounts.get(instance.id) || 0;
-      if (connections < minConnections) {
-        minConnections = connections;
-        selectedInstance = instance;
-      }
-    }
-    
-    return selectedInstance;
+  // Least connections selection / 最少连接选择
+  private leastConnectionsSelect(instances: ServiceInstance[]): ServiceInstance {
+    return instances.reduce((min, instance) => 
+      instance.connections < min.connections ? instance : min
+    );
   }
 
-  /**
-   * 最短响应时间策略
-   */
-  private selectLeastResponseTime(instances: ServiceInstance[]): ServiceInstance {
-    let minResponseTime = Infinity;
-    let selectedInstance = instances[0];
-    
-    for (const instance of instances) {
-      const responseTime = instance.responseTime || 0;
-      if (responseTime < minResponseTime) {
-        minResponseTime = responseTime;
-        selectedInstance = instance;
-      }
-    }
-    
-    return selectedInstance;
+  // Weighted least connections selection / 加权最少连接选择
+  private weightedLeastConnectionsSelect(instances: ServiceInstance[]): ServiceInstance {
+    return instances.reduce((min, instance) => {
+      const minRatio = min.connections / min.weight;
+      const instanceRatio = instance.connections / instance.weight;
+      return instanceRatio < minRatio ? instance : min;
+    });
   }
 
-  /**
-   * IP哈希策略
-   */
-  private selectIpHash(instances: ServiceInstance[], clientIp: string): ServiceInstance {
+  // Random selection / 随机选择
+  private randomSelect(instances: ServiceInstance[]): ServiceInstance {
+    const randomIndex = Math.floor(Math.random() * instances.length);
+    return instances[randomIndex];
+  }
+
+  // Weighted random selection / 加权随机选择
+  private weightedRandomSelect(instances: ServiceInstance[]): ServiceInstance {
+    return this.weightedRoundRobinSelect(instances); // Same logic / 相同逻辑
+  }
+
+  // IP hash selection / IP哈希选择
+  private ipHashSelect(instances: ServiceInstance[], clientIp: string): ServiceInstance {
     const hash = this.hashString(clientIp);
     const index = hash % instances.length;
     return instances[index];
   }
 
-  /**
-   * 随机策略
-   */
-  private selectRandom(instances: ServiceInstance[]): ServiceInstance {
-    const index = Math.floor(Math.random() * instances.length);
-    return instances[index];
+  // Least response time selection / 最少响应时间选择
+  private leastResponseTimeSelect(instances: ServiceInstance[]): ServiceInstance {
+    return instances.reduce((min, instance) => 
+      instance.responseTime < min.responseTime ? instance : min
+    );
   }
 
-  /**
-   * 获取健康的实例
-   */
-  private getHealthyInstances(): ServiceInstance[] {
-    const healthy: ServiceInstance[] = [];
-    const unhealthy: ServiceInstance[] = [];
-    
-    for (const instance of this.instances.values()) {
-      if (instance.status === ServiceStatus.HEALTHY) {
-        healthy.push(instance);
-      } else {
-        unhealthy.push(instance);
-      }
-    }
-    
-    this.stats.healthyInstances = healthy.length;
-    this.stats.unhealthyInstances = unhealthy.length;
-    
-    return healthy;
+  // Health-based selection / 基于健康的选择
+  private healthBasedSelect(instances: ServiceInstance[]): ServiceInstance {
+    return instances.reduce((best, instance) => 
+      instance.healthScore > best.healthScore ? instance : best
+    );
   }
 
-  /**
-   * 开始健康检查
-   */
-  private startHealthChecks(): void {
-    if (this.healthCheckInterval) {
-      return;
-    }
-    
-    this.healthCheckInterval = setInterval(() => {
-      this.performAllHealthChecks();
-    }, this.config.healthCheckInterval);
-    
-    console.log('Health checks started');
-  }
-
-  /**
-   * 停止健康检查
-   */
-  stopHealthChecks(): void {
-    if (this.healthCheckInterval) {
-      clearInterval(this.healthCheckInterval);
-      this.healthCheckInterval = null;
-      console.log('Health checks stopped');
-    }
-  }
-
-  /**
-   * 执行所有健康检查
-   */
-  private async performAllHealthChecks(): Promise<void> {
-    const checkPromises: Promise<void>[] = [];
-    
-    for (const instanceId of this.instances.keys()) {
-      checkPromises.push(this.performHealthCheck(instanceId));
-    }
-    
-    await Promise.allSettled(checkPromises);
-  }
-
-  /**
-   * 执行单个实例的健康检查
-   */
-  private async performHealthCheck(instanceId: string): Promise<void> {
-    const instance = this.instances.get(instanceId);
-    if (!instance) {
-      return;
-    }
-    
-    const startTime = Date.now();
-    
-    try {
-      // 模拟健康检查请求
-      const isHealthy = await this.checkInstanceHealth(instance);
-      const responseTime = Date.now() - startTime;
-      
-      const previousStatus = instance.status;
-      instance.status = isHealthy ? ServiceStatus.HEALTHY : ServiceStatus.UNHEALTHY;
-      instance.lastHealthCheck = Date.now();
-      instance.responseTime = responseTime;
-      
-      if (previousStatus !== instance.status) {
-        console.log(`Instance ${instanceId} status changed: ${previousStatus} -> ${instance.status}`);
-        this.emit('instance:status_changed', { instance, previousStatus });
-      }
-      
-    } catch (error) {
-      const previousStatus = instance.status;
-      instance.status = ServiceStatus.UNHEALTHY;
-      instance.lastHealthCheck = Date.now();
-      instance.errorCount = (instance.errorCount || 0) + 1;
-      
-      if (previousStatus !== instance.status) {
-        console.log(`Instance ${instanceId} health check failed:`, error);
-        this.emit('instance:status_changed', { instance, previousStatus });
-      }
-    }
-  }
-
-  /**
-   * 检查实例健康状态
-   */
-  private async checkInstanceHealth(instance: ServiceInstance): Promise<boolean> {
-    // 模拟健康检查逻辑
-    return new Promise((resolve) => {
-      setTimeout(() => {
-        // 90% 的概率返回健康状态
-        resolve(Math.random() > 0.1);
-      }, Math.random() * 100 + 50); // 50-150ms 响应时间
-    });
-  }
-
-  /**
-   * 字符串哈希函数
-   */
+  // Hash string function / 字符串哈希函数
   private hashString(str: string): number {
     let hash = 0;
     for (let i = 0; i < str.length; i++) {
       const char = str.charCodeAt(i);
       hash = ((hash << 5) - hash) + char;
-      hash = hash & hash; // 转换为32位整数
+      hash = hash & hash; // Convert to 32-bit integer / 转换为32位整数
     }
     return Math.abs(hash);
   }
 
-  /**
-   * 更新平均响应时间
-   */
-  private updateAverageResponseTime(responseTime: number): void {
-    const alpha = 0.1;
-    this.stats.averageResponseTime = this.stats.averageResponseTime * (1 - alpha) + responseTime * alpha;
+  // Record request result / 记录请求结果
+  recordRequest(instanceId: string, success: boolean, responseTime: number): void {
+    const instance = this.instances.get(instanceId);
+    const instanceStats = this.stats.instanceStats.get(instanceId);
+    
+    if (instance && instanceStats) {
+      // Update instance stats / 更新实例统计
+      instanceStats.requests++;
+      instanceStats.lastUsed = Date.now();
+      
+      if (success) {
+        instanceStats.successes++;
+        this.stats.successfulRequests++;
+      } else {
+        instanceStats.failures++;
+        this.stats.failedRequests++;
+      }
+
+      // Update response time / 更新响应时间
+      instanceStats.averageResponseTime = 
+        ((instanceStats.averageResponseTime * (instanceStats.requests - 1)) + responseTime) / instanceStats.requests;
+      
+      instance.responseTime = instanceStats.averageResponseTime;
+
+      // Update global stats / 更新全局统计
+      this.stats.totalRequests++;
+      this.stats.averageResponseTime = 
+        ((this.stats.averageResponseTime * (this.stats.totalRequests - 1)) + responseTime) / this.stats.totalRequests;
+
+      // Handle circuit breaker / 处理断路器
+      if (this.config.circuitBreakerEnabled) {
+        this.updateCircuitBreaker(instanceId, success);
+      }
+    }
   }
 
-  /**
-   * 获取统计信息
-   */
+  // Update circuit breaker state / 更新断路器状态
+  private updateCircuitBreaker(instanceId: string, success: boolean): void {
+    const breaker = this.circuitBreakers.get(instanceId);
+    if (!breaker) return;
+
+    const now = Date.now();
+
+    if (success) {
+      if (breaker.state === CircuitState.HALF_OPEN) {
+        // Reset circuit breaker / 重置断路器
+        breaker.state = CircuitState.CLOSED;
+        breaker.failures = 0;
+        console.log(`Circuit breaker closed for instance ${instanceId}`);
+      }
+    } else {
+      breaker.failures++;
+      breaker.lastFailureTime = now;
+
+      if (breaker.state === CircuitState.CLOSED && 
+          breaker.failures >= this.config.circuitBreakerThreshold) {
+        // Open circuit breaker / 打开断路器
+        breaker.state = CircuitState.OPEN;
+        breaker.nextAttemptTime = now + this.config.circuitBreakerTimeout;
+        console.log(`Circuit breaker opened for instance ${instanceId}`);
+        this.emit('circuit_breaker_opened', instanceId);
+      } else if (breaker.state === CircuitState.HALF_OPEN) {
+        // Back to open state / 回到打开状态
+        breaker.state = CircuitState.OPEN;
+        breaker.nextAttemptTime = now + this.config.circuitBreakerTimeout;
+      }
+    }
+  }
+
+  // Start connection tracking / 开始连接跟踪
+  startConnection(instanceId: string): void {
+    const instance = this.instances.get(instanceId);
+    const instanceStats = this.stats.instanceStats.get(instanceId);
+    
+    if (instance && instanceStats) {
+      instance.connections++;
+      instanceStats.connections++;
+      this.stats.activeConnections++;
+    }
+  }
+
+  // End connection tracking / 结束连接跟踪
+  endConnection(instanceId: string): void {
+    const instance = this.instances.get(instanceId);
+    const instanceStats = this.stats.instanceStats.get(instanceId);
+    
+    if (instance && instanceStats) {
+      instance.connections = Math.max(0, instance.connections - 1);
+      instanceStats.connections = Math.max(0, instanceStats.connections - 1);
+      this.stats.activeConnections = Math.max(0, this.stats.activeConnections - 1);
+    }
+  }
+
+  // Start health checks / 开始健康检查
+  private startHealthChecks(): void {
+    if (this.config.healthCheckInterval > 0) {
+      this.healthCheckTimer = setInterval(() => {
+        this.performHealthChecks();
+      }, this.config.healthCheckInterval);
+    }
+  }
+
+  // Perform health checks on all instances / 对所有实例执行健康检查
+  private async performHealthChecks(): Promise<void> {
+    const promises = Array.from(this.instances.values()).map(instance => 
+      this.checkInstanceHealth(instance)
+    );
+    
+    await Promise.allSettled(promises);
+  }
+
+  // Check health of a single instance / 检查单个实例的健康状态
+  private async checkInstanceHealth(instance: ServiceInstance): Promise<void> {
+    try {
+      const startTime = Date.now();
+      const url = `${instance.protocol}://${instance.host}:${instance.port}/health`;
+      
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
+      
+      const response = await fetch(url, {
+        method: 'GET',
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+      const responseTime = Date.now() - startTime;
+      
+      if (response.ok) {
+        this.updateInstanceStatus(instance.id, ServiceStatus.HEALTHY, 100);
+        instance.responseTime = responseTime;
+      } else {
+        this.updateInstanceStatus(instance.id, ServiceStatus.UNHEALTHY, 0);
+      }
+    } catch (error) {
+      this.updateInstanceStatus(instance.id, ServiceStatus.UNHEALTHY, 0);
+      console.warn(`Health check failed for instance ${instance.id}:`, error);
+    }
+  }
+
+  // Get load balancer statistics / 获取负载均衡器统计
   getStats(): LoadBalancerStats {
-    return { ...this.stats };
+    return {
+      ...this.stats,
+      instanceStats: new Map(this.stats.instanceStats)
+    };
   }
 
-  /**
-   * 获取所有实例状态
-   */
-  getInstancesStatus(): ServiceInstance[] {
+  // Get instance by ID / 根据ID获取实例
+  getInstance(instanceId: string): ServiceInstance | undefined {
+    return this.instances.get(instanceId);
+  }
+
+  // Get all instances / 获取所有实例
+  getAllInstances(): ServiceInstance[] {
     return Array.from(this.instances.values());
   }
 
-  /**
-   * 获取实例详情
-   */
-  getInstanceDetails(instanceId: string): ServiceInstance | null {
-    return this.instances.get(instanceId) || null;
+  // Get healthy instances / 获取健康实例
+  getHealthyInstances(): ServiceInstance[] {
+    return Array.from(this.instances.values()).filter(
+      instance => instance.status === ServiceStatus.HEALTHY
+    );
   }
 
-  /**
-   * 设置实例权重
-   */
-  setInstanceWeight(instanceId: string, weight: number): boolean {
-    const instance = this.instances.get(instanceId);
-    if (!instance) {
-      return false;
-    }
+  // Update configuration / 更新配置
+  updateConfig(newConfig: Partial<LoadBalancerConfig>): void {
+    this.config = { ...this.config, ...newConfig };
     
-    instance.weight = weight;
-    console.log(`Instance ${instanceId} weight updated to ${weight}`);
-    this.emit('instance:weight_changed', { instanceId, weight });
-    
-    return true;
-  }
-
-  /**
-   * 排空实例（停止发送新请求）
-   */
-  drainInstance(instanceId: string): boolean {
-    const instance = this.instances.get(instanceId);
-    if (!instance) {
-      return false;
-    }
-    
-    instance.status = ServiceStatus.DRAINING;
-    console.log(`Instance ${instanceId} is being drained`);
-    this.emit('instance:draining', instance);
-    
-    return true;
-  }
-
-  /**
-   * 清理资源
-   */
-  async cleanup(): Promise<void> {
-    this.stopHealthChecks();
-    this.instances.clear();
-    this.connectionCounts.clear();
-    this.circuitBreakers.clear();
-    this.removeAllListeners();
-    
-    console.log('LoadBalancer cleaned up');
-  }
-}
-
-/**
- * 熔断器类
- */
-class CircuitBreaker {
-  private failureThreshold: number;
-  private timeout: number;
-  private failureCount: number;
-  private lastFailureTime: number;
-  private state: 'closed' | 'open' | 'half-open';
-
-  constructor(failureThreshold: number, timeout: number) {
-    this.failureThreshold = failureThreshold;
-    this.timeout = timeout;
-    this.failureCount = 0;
-    this.lastFailureTime = 0;
-    this.state = 'closed';
-  }
-
-  /**
-   * 记录成功
-   */
-  recordSuccess(): void {
-    this.failureCount = 0;
-    this.state = 'closed';
-  }
-
-  /**
-   * 记录失败
-   */
-  recordFailure(): void {
-    this.failureCount++;
-    this.lastFailureTime = Date.now();
-    
-    if (this.failureCount >= this.failureThreshold) {
-      this.state = 'open';
-    }
-  }
-
-  /**
-   * 检查熔断器是否开启
-   */
-  isOpen(): boolean {
-    if (this.state === 'closed') {
-      return false;
-    }
-    
-    if (this.state === 'open') {
-      // 检查是否可以进入半开状态
-      if (Date.now() - this.lastFailureTime >= this.timeout) {
-        this.state = 'half-open';
-        return false;
+    // Restart health checks if interval changed / 如果间隔改变则重启健康检查
+    if (newConfig.healthCheckInterval !== undefined) {
+      if (this.healthCheckTimer) {
+        clearInterval(this.healthCheckTimer);
       }
-      return true;
+      this.startHealthChecks();
     }
     
-    // half-open 状态允许一个请求通过
-    return false;
+    console.log('Load balancer configuration updated');
+    this.emit('config_updated', this.config);
   }
 
-  /**
-   * 获取重试时间
-   */
-  getRetryAfter(): number {
-    if (this.state === 'open') {
-      return this.timeout - (Date.now() - this.lastFailureTime);
+  // Clean up sticky sessions / 清理粘性会话
+  private cleanupStickySessions(): void {
+    // This would be called periodically to remove expired sessions / 这将定期调用以移除过期会话
+    // Implementation depends on TTL tracking / 实现取决于TTL跟踪
+  }
+
+  // Stop load balancer / 停止负载均衡器
+  stop(): void {
+    if (this.healthCheckTimer) {
+      clearInterval(this.healthCheckTimer);
+      this.healthCheckTimer = undefined;
     }
-    return 0;
+    
+    this.instances.clear();
+     this.stats.instanceStats.clear();
+     this.circuitBreakers.clear();
+     this.stickySessions.clear();
+    
+    console.log('Load balancer stopped');
+    this.emit('stopped');
   }
 
-  /**
-   * 获取状态
-   */
-  getState(): string {
-    return this.state;
+  // Get load balancer status / 获取负载均衡器状态
+  getStatus(): any {
+    return {
+      strategy: this.config.strategy,
+      totalInstances: this.instances.size,
+      healthyInstances: this.getHealthyInstances().length,
+      activeConnections: this.stats.activeConnections,
+      totalRequests: this.stats.totalRequests,
+      successRate: this.stats.totalRequests > 0 ? 
+        (this.stats.successfulRequests / this.stats.totalRequests * 100).toFixed(2) + '%' : '0%',
+      averageResponseTime: Math.round(this.stats.averageResponseTime) + 'ms',
+      circuitBreakers: Array.from(this.circuitBreakers.entries()).map(([id, breaker]) => ({
+        instanceId: id,
+        state: breaker.state,
+        failures: breaker.failures
+      }))
+    };
+  }
+
+  // Get service status for all instances / 获取所有实例的服务状态
+  getServiceStatus(): any {
+    return Array.from(this.instances.values()).map(instance => {
+      const stats = this.stats.instanceStats.get(instance.id);
+      const breaker = this.circuitBreakers.get(instance.id);
+      
+      return {
+        id: instance.id,
+        host: instance.host,
+        port: instance.port,
+        protocol: instance.protocol,
+        status: instance.status,
+        weight: instance.weight,
+        healthScore: instance.healthScore,
+        lastHealthCheck: new Date(instance.lastHealthCheck).toISOString(),
+        connections: instance.connections,
+        responseTime: instance.responseTime,
+        metadata: instance.metadata,
+        stats: stats ? {
+          requests: stats.requests,
+          successes: stats.successes,
+          failures: stats.failures,
+          averageResponseTime: Math.round(stats.averageResponseTime),
+          lastUsed: stats.lastUsed > 0 ? new Date(stats.lastUsed).toISOString() : null
+        } : null,
+        circuitBreaker: breaker ? {
+          state: breaker.state,
+          failures: breaker.failures,
+          lastFailureTime: breaker.lastFailureTime > 0 ? new Date(breaker.lastFailureTime).toISOString() : null,
+          nextAttemptTime: breaker.nextAttemptTime > 0 ? new Date(breaker.nextAttemptTime).toISOString() : null
+        } : null
+      };
+    });
   }
 }

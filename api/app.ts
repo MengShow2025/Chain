@@ -1,5 +1,5 @@
 /**
- * This is a API server
+ * TitanChain API Server / TitanChain API服务器
  */
 
 import express, {
@@ -11,21 +11,25 @@ import cors from 'cors'
 import path from 'path'
 import dotenv from 'dotenv'
 import { fileURLToPath } from 'url'
-import authRoutes from './routes/auth.js'
-import explorerRoutes from './explorer/routes.js'
-import validatorRoutes from './validators/routes.js'
-import transactionRoutes from './transactions/routes.js'
-import walletRoutes from './wallet/routes.js'
-import blockchainRoutes from './blockchain/routes.js'
-import { SECURITY_VALIDATION, PERFORMANCE_CONFIG, SEQUENCER_CONFIG, ADAPTIVE_BATCH_CONFIG } from '../shared/constants/blockchain.js'
-import { adaptiveBatchController } from '../shared/utils/adaptive-batch.js'
-import { blockchainInstance } from '../shared/blockchain-instance.js'
+import authRoutes from './routes/auth'
+import explorerRoutes from './explorer/routes'
+import validatorRoutes from './validators/routes'
+import transactionRoutes from './transactions/routes'
+import blocksRoutes from './blocks/routes'
+import walletRoutes from './wallet/routes'
+import blockchainRoutes from './blockchain/routes'
+import securityRoutes from './security/routes'
+import marginRoutes from './routes/margin'
+import { generateApiDocs } from './docs/swagger-config'
+import { SECURITY_VALIDATION, PERFORMANCE_CONFIG, SEQUENCER_CONFIG, ADAPTIVE_BATCH_CONFIG } from '../shared/constants/blockchain'
+import { adaptiveBatchController } from '../shared/utils/adaptive-batch'
+import { blockchainInstance } from '../shared/blockchain-instance'
 
-// for esm mode
+// For ESM mode / ESM模式支持
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
-// load env
+// Load environment variables / 加载环境变量
 dotenv.config()
 
 const app: express.Application = express()
@@ -34,7 +38,7 @@ app.use(cors())
 app.use(express.json({ limit: '10mb' }))
 app.use(express.urlencoded({ extended: true, limit: '10mb' }))
 
-// ===== 入入口层限流与熔断（Traffic Guard） =====
+// Entry-level rate limiting and circuit breaker (Traffic Guard) / 入口层限流与熔断（流量守护）
 const RATE_LIMIT_ENABLED = process.env.RATE_LIMIT_ENABLED === 'true'
 const RATE_LIMIT_WINDOW_MS = Number.parseInt(process.env.RATE_LIMIT_WINDOW_MS ?? '1000')
 const RATE_LIMIT_MAX_REQUESTS = Number.parseInt(process.env.RATE_LIMIT_MAX_REQUESTS ?? '100')
@@ -45,267 +49,252 @@ const CB_ERROR_RATE_THRESHOLD = Number.parseFloat(process.env.CB_ERROR_RATE_THRE
 const CB_MIN_REQUESTS = Number.parseInt(process.env.CB_MIN_REQUESTS ?? '50')
 const CB_COOLDOWN_MS = Number.parseInt(process.env.CB_COOLDOWN_MS ?? '15000')
 
+// Rate limiting state types / 限流状态类型
 type RateState = { count: number; windowStart: number }
 type CBState = { total: number; errors: number; windowStart: number; openUntil?: number }
 const rateState: Map<string, RateState> = new Map()
 const cbState: Map<string, CBState> = new Map()
 
-// ===== 自适应限流（根据链上交易池压力动态调整） =====
+// Adaptive rate limiting configuration / 自适应限流配置
 const ADAPTIVE_RATE_LIMIT = process.env.ADAPTIVE_RATE_LIMIT === 'true'
 const ADAPTIVE_WINDOW_MS = Number.parseInt(process.env.ADAPTIVE_WINDOW_MS ?? '1000')
-const GLOBAL_BASE_RPS = Number.parseInt(process.env.GLOBAL_BASE_RPS ?? '1000') // 每窗口允许的全局请求数（submit路径）
+const GLOBAL_BASE_RPS = Number.parseInt(process.env.GLOBAL_BASE_RPS ?? '1000') // Global requests allowed per window (submit path) / 每窗口允许的全局请求数（submit路径）
 const MIN_GLOBAL_LIMIT = Number.parseInt(process.env.MIN_GLOBAL_LIMIT ?? '100')
 const BACKPRESSURE_503_THRESHOLD = Number.parseFloat(process.env.BACKPRESSURE_503_THRESHOLD ?? '0.98')
 
+// Adaptive state type / 自适应状态类型
 type AdaptiveState = { count: number; windowStart: number; currentLimit: number }
 const adaptiveState: AdaptiveState = { count: 0, windowStart: Date.now(), currentLimit: GLOBAL_BASE_RPS }
 
+// Compute system pressure / 计算系统压力
 function computePressure() {
   try {
-    const chain = blockchainInstance.getBlockchain()
-    if (!chain) {
-      // 在测试/开发模式下，根据观察到的请求速率估算压力，避免低负载阶段阈值过低
-      if (process.env.NODE_ENV === 'development' || process.env.TESTING_MODE === 'true') {
-        const now = Date.now()
-        const elapsedMs = Math.max(1, now - adaptiveState.windowStart)
-        // 基于当前窗口的请求数估算RPS
-        const rpsEstimate = (adaptiveState.count / elapsedMs) * 1000
-        // 压力为 RPS 与全局基线之比，限制在 [0.05, 1.0]
-        const pressure = Math.max(0.05, Math.min(1.0, rpsEstimate / GLOBAL_BASE_RPS))
-        // 批量压力与交易压力保持一致（在无链实例情况下）
-        const batchPressure = pressure
-        return { pressure, batchPressure }
-      }
-      return { pressure: 0.1, batchPressure: 0.1 } // 默认低压力（生产环境下无链）
-    }
-    const stats = chain.getTransactionPoolStats()
-    const pending = Number(stats?.pendingTransactions ?? 0)
-    const maxPending = Number(PERFORMANCE_CONFIG.MAX_PENDING_TRANSACTIONS)
-    const activeBatches = Number(stats?.activeBatches ?? 0)
-    const maxBatches = Number(SEQUENCER_CONFIG.MAX_PENDING_BATCHES)
-    const pressure = maxPending > 0 ? Math.min(1, pending / maxPending) : 0
-    const batchPressure = maxBatches > 0 ? Math.min(1, activeBatches / maxBatches) : 0
-    return { pressure, batchPressure }
-  } catch (e) {
-    console.warn('Failed to compute pressure:', e)
-    return { pressure: 0.1, batchPressure: 0.1 }
+    // Get blockchain instance / 获取区块链实例
+    const blockchain = blockchainInstance.getBlockchain()
+    if (!blockchain) return 0.1
+
+    // Get network stats / 获取网络统计
+    const stats = blockchain.getNetworkStats()
+    
+    // Calculate pressure based on TPS and total transactions / 基于TPS和总交易数计算压力
+    const tpsPressure = Math.min(stats.currentTPS / 10000, 1) // Normalize to 10k TPS / 标准化到10k TPS
+    const txPressure = Math.min(stats.totalTransactions / 100000, 1) // Normalize to 100k total / 标准化到10万总交易
+    
+    // Memory usage pressure / 内存使用压力
+    const memUsage = process.memoryUsage()
+    const memPressure = Math.min(memUsage.heapUsed / (1024 * 1024 * 1024), 1) // Normalize to 1GB / 标准化到1GB
+    
+    // Combined pressure / 综合压力
+    return Math.max(tpsPressure, txPressure, memPressure)
+  } catch (error) {
+    console.warn('Failed to compute pressure:', error)
+    return 0.1 // Default low pressure / 默认低压力
   }
 }
 
+// Update adaptive limit based on pressure / 基于压力更新自适应限制
 function updateAdaptiveLimit(now: number) {
-  // 仅在窗口切换或启动时更新，以降低开销
-  const { pressure, batchPressure } = computePressure()
-  // 线性衰减 + 最低保留 15%
-  const multiplier = Math.max(0.15, 1 - Math.max(pressure, batchPressure))
-  const nextLimit = Math.max(MIN_GLOBAL_LIMIT, Math.floor(GLOBAL_BASE_RPS * multiplier))
-  adaptiveState.currentLimit = nextLimit
-  adaptiveState.windowStart = now
-  adaptiveState.count = 0
+  const pressure = computePressure()
+  const targetLimit = Math.max(MIN_GLOBAL_LIMIT, Math.floor(GLOBAL_BASE_RPS * (1 - pressure)))
+  
+  // Smooth adjustment / 平滑调整
+  adaptiveState.currentLimit = Math.floor(
+    adaptiveState.currentLimit * 0.9 + targetLimit * 0.1
+  )
 }
 
+// Rate limiting and circuit breaker middleware / 限流和熔断中间件
 app.use((req: Request, res: Response, next: NextFunction) => {
   const now = Date.now()
-  // --- 限流 ---
-  if (RATE_LIMIT_ENABLED) {
-    const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.ip
-    const key = `${req.method}|${ip}`
-    let st = rateState.get(key)
-    if (!st || now - st.windowStart >= RATE_LIMIT_WINDOW_MS) {
-      st = { count: 0, windowStart: now }
-      rateState.set(key, st)
-    }
-    st.count++
-    if (st.count > RATE_LIMIT_MAX_REQUESTS) {
-      return res.status(429).json({ success: false, error: 'rate_limit_exceeded' })
-    }
-  }
-
-  // --- 自适应限流（仅作用于交易提交路径）---
-  if (ADAPTIVE_RATE_LIMIT && req.method === 'POST' && req.path.startsWith('/api/transactions/submit')) {
-    // 过载保护：当压力超过阈值直接返回 503
-    const { pressure, batchPressure } = computePressure()
-    const maxPressure = Math.max(pressure, batchPressure)
-    if (maxPressure >= BACKPRESSURE_503_THRESHOLD) {
-      return res.status(503).json({ success: false, error: 'backpressure_overload' })
-    }
-    // 窗口重置与动态限额更新
+  const clientId = req.ip || 'unknown'
+  
+  // Adaptive rate limiting / 自适应限流
+  if (ADAPTIVE_RATE_LIMIT) {
+    // Reset window if needed / 如需要则重置窗口
     if (now - adaptiveState.windowStart >= ADAPTIVE_WINDOW_MS) {
+      adaptiveState.count = 0
+      adaptiveState.windowStart = now
       updateAdaptiveLimit(now)
-      if (process.env.NODE_ENV === 'development') {
-        console.log(`[AdaptiveLimit] pressure=${maxPressure.toFixed(3)} limit=${adaptiveState.currentLimit}`)
-      }
     }
+    
     adaptiveState.count++
+    
+    // Check if over limit / 检查是否超限
     if (adaptiveState.count > adaptiveState.currentLimit) {
-      return res.status(429).json({ success: false, error: 'adaptive_rate_limit' })
+      const pressure = computePressure()
+      if (pressure > BACKPRESSURE_503_THRESHOLD) {
+        return res.status(503).json({
+          error: 'Service temporarily unavailable due to high load',
+          retryAfter: Math.ceil(ADAPTIVE_WINDOW_MS / 1000)
+        })
+      }
     }
   }
-
-  // --- 熔断预检与统计 ---
+  
+  // Per-client rate limiting / 每客户端限流
+  if (RATE_LIMIT_ENABLED) {
+    let state = rateState.get(clientId)
+    if (!state || now - state.windowStart >= RATE_LIMIT_WINDOW_MS) {
+      state = { count: 0, windowStart: now }
+      rateState.set(clientId, state)
+    }
+    
+    state.count++
+    if (state.count > RATE_LIMIT_MAX_REQUESTS) {
+      return res.status(429).json({
+        error: 'Rate limit exceeded',
+        retryAfter: Math.ceil((state.windowStart + RATE_LIMIT_WINDOW_MS - now) / 1000)
+      })
+    }
+  }
+  
+  // Circuit breaker / 熔断器
   if (CIRCUIT_BREAKER_ENABLED) {
-    const cbKey = `${req.method}|${req.path}`
-    const s = cbState.get(cbKey)
-    if (s?.openUntil && now < s.openUntil) {
-      return res.status(503).json({ success: false, error: 'circuit_open' })
+    let cbStateData = cbState.get(clientId)
+    if (!cbStateData || now - cbStateData.windowStart >= CB_WINDOW_MS) {
+      cbStateData = { total: 0, errors: 0, windowStart: now }
+      cbState.set(clientId, cbStateData)
     }
-    // 在响应结束时统计错误率并可能打开熔断
-    res.on('finish', () => {
-      const endNow = Date.now()
-      let st = cbState.get(cbKey)
-      if (!st || endNow - st.windowStart >= CB_WINDOW_MS) {
-        st = { total: 0, errors: 0, windowStart: endNow }
-        cbState.set(cbKey, st)
-      }
-      st.total++
-      if (res.statusCode >= 500) st.errors++
-      if (st.total >= CB_MIN_REQUESTS) {
-        const rate = st.errors / st.total
-        if (rate >= CB_ERROR_RATE_THRESHOLD) {
-          st.openUntil = endNow + CB_COOLDOWN_MS
-          if (process.env.NODE_ENV === 'development') {
-            console.warn(`[CircuitBreaker] Opened for ${cbKey} until ${new Date(st.openUntil).toISOString()} (rate=${rate.toFixed(2)})`)
-          }
-        }
-      }
-    })
+    
+    // Check if circuit is open / 检查熔断器是否开启
+    if (cbStateData.openUntil && now < cbStateData.openUntil) {
+      return res.status(503).json({
+        error: 'Circuit breaker is open',
+        retryAfter: Math.ceil((cbStateData.openUntil - now) / 1000)
+      })
+    }
+    
+    cbStateData.total++
   }
+  
   next()
 })
 
-// 安全模式启动映射：在未显式设置时同步环境开关，便于开发调试
+// Initialize blockchain instance / 初始化区块链实例
 try {
-  const mode = SECURITY_VALIDATION.SECURITY_MODE
-  if (process.env.SKIP_WITNESS_VALIDATION == null) {
-    process.env.SKIP_WITNESS_VALIDATION = mode === 'perf_eval' ? 'true' : 'false'
-  }
-  if (process.env.NODE_ENV === 'development') {
-    console.log(`[App] Security mode=${mode} SKIP_WITNESS_VALIDATION=${process.env.SKIP_WITNESS_VALIDATION}`)
+  const blockchain = blockchainInstance.getBlockchain()
+  if (blockchain) {
+    console.log('Blockchain instance initialized successfully / 区块链实例初始化成功')
   }
 } catch (e) {
-  console.warn('[App] Security mode bootstrap failed:', e)
+  console.error('Failed to initialize blockchain instance / 区块链实例初始化失败:', e)
 }
 
-/**
- * API Routes
- */
+// API Documentation / API文档
+app.use(generateApiDocs)
+
+// Routes / 路由
 app.use('/api/auth', authRoutes)
 app.use('/api/explorer', explorerRoutes)
 app.use('/api/validators', validatorRoutes)
 app.use('/api/transactions', transactionRoutes)
+app.use('/api/blocks', blocksRoutes)
 app.use('/api/wallet', walletRoutes)
 app.use('/api/blockchain', blockchainRoutes)
+app.use('/api/security', securityRoutes)
+app.use('/api/margin', marginRoutes)
 
-// 自适应限流状态查询（仅用于调试/监控）
+// Adaptive limits monitoring endpoint / 自适应限制监控端点
 app.get('/api/limits/adaptive', (req: Request, res: Response) => {
-  try {
-    const now = Date.now();
-    const { pressure, batchPressure } = computePressure();
-    const state = {
+  const pressure = computePressure()
+  res.json({
+    adaptive: {
+      enabled: ADAPTIVE_RATE_LIMIT,
       currentLimit: adaptiveState.currentLimit,
+      baseLimit: GLOBAL_BASE_RPS,
+      minLimit: MIN_GLOBAL_LIMIT,
+      currentCount: adaptiveState.count,
       windowStart: adaptiveState.windowStart,
-      count: adaptiveState.count,
       windowMs: ADAPTIVE_WINDOW_MS,
-      baseRps: GLOBAL_BASE_RPS,
-      minGlobalLimit: MIN_GLOBAL_LIMIT,
-      pressure,
-      batchPressure,
-      maxPressure: Math.max(pressure, batchPressure),
-      ts: now
-    };
-    res.json({ success: true, state });
-  } catch (e) {
-    res.status(500).json({ success: false, error: 'adaptive_state_error' });
-  }
+      pressure: pressure,
+      backpressureThreshold: BACKPRESSURE_503_THRESHOLD
+    },
+    rateLimit: {
+      enabled: RATE_LIMIT_ENABLED,
+      windowMs: RATE_LIMIT_WINDOW_MS,
+      maxRequests: RATE_LIMIT_MAX_REQUESTS
+    },
+    circuitBreaker: {
+      enabled: CIRCUIT_BREAKER_ENABLED,
+      windowMs: CB_WINDOW_MS,
+      errorThreshold: CB_ERROR_RATE_THRESHOLD,
+      minRequests: CB_MIN_REQUESTS,
+      cooldownMs: CB_COOLDOWN_MS
+    }
+  })
 })
 
-// 自适应批量阈值状态查询（用于调试/监控）
+// Batch processing status endpoint / 批处理状态端点
 app.get('/api/limits/batch', (req: Request, res: Response) => {
   try {
-    // 以当前交易池状态估算压力（复用 computePressure）
-    const now = Date.now()
-    const { pressure, batchPressure } = computePressure()
-    
-    // 模拟交易池统计数据用于更新自适应批量控制器
-    // 使用系统配置的最大待处理交易数进行缩放，确保压力与阈值调整幅度匹配
-    const mockPendingTransactions = Math.floor(
-      pressure * Number(PERFORMANCE_CONFIG.MAX_PENDING_TRANSACTIONS)
-    )
-    const mockActiveBatches = (
-      batchPressure >= BACKPRESSURE_503_THRESHOLD
-        ? SEQUENCER_CONFIG.MAX_PENDING_BATCHES
-        : Math.min(
-            SEQUENCER_CONFIG.MAX_PENDING_BATCHES,
-            Math.ceil(batchPressure * SEQUENCER_CONFIG.MAX_PENDING_BATCHES)
-          )
-    ) // 基于批量压力模拟活跃批次数（高压力达到上限）
-    
-    // 更新自适应批量控制器状态
-    adaptiveBatchController.update(mockPendingTransactions, mockActiveBatches)
-    
-    const st = adaptiveBatchController.getState()
-    const payload = {
-      enabled: (process.env.ADAPTIVE_BATCH_ENABLED ?? 'true') === 'true' && ADAPTIVE_BATCH_CONFIG.ENABLED,
-      sizeThreshold: st.sizeThreshold,
-      volumeThreshold: st.volumeThreshold.toString(),
-      lastAdjust: st.lastAdjust,
-      controllerPressure: st.pressure,
-      observedPressure: pressure,
-      observedBatchPressure: batchPressure,
-      windowMs: st.windowMs,
-      bounds: {
-        minSize: ADAPTIVE_BATCH_CONFIG.MIN_SIZE_THRESHOLD,
-        maxSize: ADAPTIVE_BATCH_CONFIG.MAX_SIZE_THRESHOLD,
-        minVolume: ADAPTIVE_BATCH_CONFIG.MIN_VOLUME_THRESHOLD.toString(),
-        maxVolume: ADAPTIVE_BATCH_CONFIG.MAX_VOLUME_THRESHOLD.toString(),
-      },
-      ts: now,
-    }
-    res.json({ success: true, state: payload })
-  } catch (e) {
-    res.status(500).json({ success: false, error: 'batch_adaptive_state_error' })
+    const batchStatus = adaptiveBatchController.getState()
+    res.json({
+      batch: {
+        enabled: true,
+        config: {
+          maxBatchSize: ADAPTIVE_BATCH_CONFIG.MAX_SIZE_THRESHOLD,
+          minBatchSize: ADAPTIVE_BATCH_CONFIG.MIN_SIZE_THRESHOLD,
+          batchTimeoutMs: ADAPTIVE_BATCH_CONFIG.WINDOW_MS,
+          adaptiveThreshold: ADAPTIVE_BATCH_CONFIG.ADJUST_RATE
+        },
+        status: batchStatus,
+        sequencer: {
+          enabled: true,
+          config: {
+            maxOrdersPerBatch: SEQUENCER_CONFIG.MAX_ORDERS_PER_BATCH,
+            microbatchInterval: SEQUENCER_CONFIG.MICROBATCH_INTERVAL_MS,
+            maxPendingBatches: SEQUENCER_CONFIG.MAX_PENDING_BATCHES
+          }
+        },
+        performance: {
+          targetTps: PERFORMANCE_CONFIG.TARGET_TPS,
+          maxBlockSize: PERFORMANCE_CONFIG.MAX_BLOCK_SIZE,
+          adaptiveScaling: true
+        }
+      }
+    })
+  } catch (error) {
+    res.status(500).json({
+      error: 'Failed to get batch status',
+      details: error instanceof Error ? error.message : 'Unknown error'
+    })
   }
 })
 
-// 仅用于测试：模拟 500 错误以验证熔断（需设置 ENABLE_TEST_ROUTES=true）
+// Test routes (only in development) / 测试路由（仅开发环境）
 if (process.env.ENABLE_TEST_ROUTES === 'true') {
-  app.get('/api/test/error500', (req: Request, res: Response) => {
-    throw new Error('test_500_error')
+  app.get('/api/test/pressure', (req: Request, res: Response) => {
+    res.json({ pressure: computePressure() })
   })
 }
 
-/**
- * health
- */
+// Health check endpoint / 健康检查端点
 app.use(
   '/api/health',
   (req: Request, res: Response, next: NextFunction): void => {
-    res.status(200).json({
-      success: true,
-      message: 'ok',
+    res.json({
+      status: 'healthy',
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime()
     })
-  },
+  }
 )
 
-/**
- * error handler middleware
- */
+// Global error handler / 全局错误处理器
 app.use((error: Error, req: Request, res: Response, next: NextFunction) => {
-  console.error('API Error:', error.message)
-  console.error('Stack:', error.stack)
+  console.error('Global error handler / 全局错误处理器:', error)
+  
   res.status(500).json({
-    success: false,
-    error: 'Server internal error',
-    details: process.env.NODE_ENV === 'development' ? error.message : undefined,
+    error: 'Internal server error',
+    message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong'
   })
 })
 
-/**
- * 404 handler
- */
+// 404 handler / 404处理器
 app.use((req: Request, res: Response) => {
   res.status(404).json({
-    success: false,
-    error: 'API not found',
+    error: 'Not found',
+    path: req.path
   })
 })
 

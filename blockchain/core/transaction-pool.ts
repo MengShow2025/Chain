@@ -1,4 +1,4 @@
-import { Transaction, ExchangeBatch } from '../../shared/types/blockchain.js';
+import { Transaction } from '../../shared/types/blockchain.js';
 import { PERFORMANCE_CONFIG, ZERO_GAS_CONFIG, ERROR_CODES } from '../../shared/constants/blockchain.js';
 import { adaptiveBatchController } from '../../shared/utils/adaptive-batch.js';
 
@@ -9,7 +9,6 @@ import { adaptiveBatchController } from '../../shared/utils/adaptive-batch.js';
 export class TransactionPool {
   private pendingTransactions: Map<string, Transaction> = new Map();
   private zeroGasTransactions: Map<string, Transaction> = new Map();
-  private exchangeBatches: Map<string, ExchangeBatch> = new Map();
   private nonceTracker: Map<string, number> = new Map();
   private gasTracker: Map<string, bigint> = new Map();
   // 压测模式：通过环境变量启用以绕过反作弊/限流/nonce连续性等，便于压力测试
@@ -24,7 +23,6 @@ export class TransactionPool {
   private stats = {
     totalTransactions: 0,
     zeroGasTransactions: 0,
-    batchTransactions: 0,
     rejectedTransactions: 0,
     averageProcessingTime: 0
   };
@@ -97,11 +95,6 @@ export class TransactionPool {
       return false;
     }
     
-    // 检查交易所批量处理
-    if (tx.exchangeBatch) {
-      return await this.addExchangeBatchTransaction(tx);
-    }
-    
     // 检查智能合约分层收费
     if (tx.contractTier) {
       return await this.addContractTierTransaction(tx);
@@ -116,57 +109,7 @@ export class TransactionPool {
     return true;
   }
   
-  /**
-   * 添加交易所批量交易
-   */
-  private async addExchangeBatchTransaction(tx: Transaction): Promise<boolean> {
-    if (!tx.exchangeBatch) return false;
-    
-    const batchId = tx.exchangeBatch.batchId;
-    
-    // 获取或创建批量处理记录
-    let batch = this.exchangeBatches.get(batchId);
-    if (!batch) {
-      batch = {
-        batchId,
-        exchangeId: tx.exchangeBatch.exchangeId,
-        totalTransactions: 0,
-        totalVolume: BigInt(0),
-        timestamp: Date.now(),
-        transactions: [],
-        status: 'pending',
-        createdAt: Date.now()
-      };
-      this.exchangeBatches.set(batchId, batch);
-    }
-    
-    // 添加交易到批量
-    batch.transactions.push(tx.hash);
-    batch.totalTransactions++;
-    batch.totalVolume += tx.value;
-    
-    // 检查是否达到批量处理阈值（自适应）
-    const pendingTransactionsCount = this.pendingTransactions.size + this.zeroGasTransactions.size;
-    const pendingBatchesCount = Array.from(this.exchangeBatches.values()).filter(b => b.status === 'pending').length;
-    const { sizeThreshold, volumeThreshold } = adaptiveBatchController.update(pendingTransactionsCount, pendingBatchesCount);
 
-    if (batch.transactions.length >= sizeThreshold ||
-        batch.totalVolume >= volumeThreshold) {
-      
-      // 标记批量为处理状态
-      batch.status = 'processing';
-      
-      // 将交易添加到0-gas费池
-      this.zeroGasTransactions.set(tx.hash, tx);
-      
-      this.stats.batchTransactions++;
-      this.stats.totalTransactions++;
-      
-      console.log(`Batch ${batchId} is processing with ${batch.transactions.length} transactions`);
-    }
-    
-    return true;
-  }
   
   /**
    * 添加智能合约分层交易
@@ -293,26 +236,15 @@ export class TransactionPool {
    * 验证0-gas费交易
    */
   private validateZeroGasTransaction(tx: Transaction): boolean {
-    // 必须有批量ID或合约层级
-    if (!tx.exchangeBatch && !tx.contractTier) {
-      console.error('Zero-gas transaction must have exchangeBatch or contractTier');
+    if (!tx.contractTier) {
+      console.error('Zero-gas transaction must have contractTier');
       return false;
     }
     
-    // 验证交易所批量
-    if (tx.exchangeBatch) {
-      if (!tx.exchangeBatch.batchId || !tx.exchangeBatch.exchangeId) {
-        console.error('Invalid exchange batch information');
-        return false;
-      }
-    }
-    
     // 验证合约层级
-    if (tx.contractTier) {
-      if (tx.contractTier < 1 || tx.contractTier > 3) {
-        console.error('Invalid contract tier');
-        return false;
-      }
+    if (tx.contractTier < 1 || tx.contractTier > 3) {
+      console.error('Invalid contract tier');
+      return false;
     }
     
     return true;
@@ -431,12 +363,7 @@ export class TransactionPool {
       }
     }
     
-    // 清理过期批量
-    for (const [batchId, batch] of this.exchangeBatches) {
-      if (now - batch.createdAt > maxAge) {
-        this.exchangeBatches.delete(batchId);
-      }
-    }
+
     
     if (cleaned > 0) {
       console.log(`Cleaned up ${cleaned} expired transactions`);
@@ -458,7 +385,6 @@ export class TransactionPool {
       ...this.stats,
       pendingTransactions: this.pendingTransactions.size,
       zeroGasPoolSize: this.zeroGasTransactions.size,
-      activeBatches: this.exchangeBatches.size,
       totalPoolSize: this.pendingTransactions.size + this.zeroGasTransactions.size
     };
   }
@@ -491,12 +417,7 @@ export class TransactionPool {
     return transactions.sort((a, b) => a.nonce - b.nonce);
   }
   
-  /**
-   * 获取批量处理状态
-   */
-  getBatchStatus(batchId: string): ExchangeBatch | null {
-    return this.exchangeBatches.get(batchId) || null;
-  }
+
   
   /**
    * 反垃圾邮件保护

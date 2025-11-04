@@ -311,3 +311,5 @@ export const BlockDetail: React.FC = () => {
     </div>
   );
 };
+
+export default BlockDetail;

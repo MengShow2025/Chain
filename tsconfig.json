@@ -22,6 +22,9 @@
     "noFallthroughCasesInSwitch": false,
     "noUncheckedSideEffectImports": false,
     "forceConsistentCasingInFileNames": false,
+    "downlevelIteration": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
     "baseUrl": "./",
     "paths": {
       "@/*": [
@@ -30,7 +33,8 @@
     },
     "types": [
       "node",
-      "express"
+      "express",
+      "jest"
     ]
   },
   "include": [

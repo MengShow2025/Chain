@@ -39,7 +39,7 @@ export class P2PNode {
     this.peers = new Map();
     this.nodeId = process.env.NODE_ID || crypto.randomUUID();
     this.options = {
-      port: options?.port ?? Number(process.env.P2P_PORT || 4001),
+      port: options?.port ?? Number(process.env.P2P_PORT || 4003),
       host: options?.host ?? (process.env.P2P_HOST || '0.0.0.0'),
       bootnodes: options?.bootnodes ?? parseBootnodes(process.env.BOOTNODES)
     };
@@ -404,9 +404,6 @@ function normalizeTransaction(tx: any): any {
   if (typeof t.value === 'bigint') t.value = t.value.toString();
   if (typeof t.gas === 'bigint') t.gas = t.gas.toString();
   if (typeof t.gasPrice === 'bigint') t.gasPrice = t.gasPrice.toString();
-  if (t.exchangeBatch && typeof t.exchangeBatch.totalVolume === 'bigint') {
-    t.exchangeBatch = { ...t.exchangeBatch, totalVolume: t.exchangeBatch.totalVolume.toString() };
-  }
   return t;
 }
 
@@ -431,8 +428,5 @@ function parseTransaction(tx: any): any {
   t.value = toBigInt(t.value);
   t.gas = toBigInt(t.gas);
   t.gasPrice = toBigInt(t.gasPrice);
-  if (t.exchangeBatch && typeof t.exchangeBatch.totalVolume === 'string') {
-    t.exchangeBatch = { ...t.exchangeBatch, totalVolume: BigInt(t.exchangeBatch.totalVolume) };
-  }
   return t;
 }

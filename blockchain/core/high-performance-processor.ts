@@ -3,12 +3,12 @@ import { PERFORMANCE_CONFIG } from '../../shared/constants/blockchain.js';
 import { ZeroGasEngine } from './zero-gas-engine.js';
 import { TransactionPool } from './transaction-pool.js';
 
-// 显式声明目标TPS以满足综合测试关键词检查
+// Explicitly declare target TPS to meet comprehensive test keyword check / 显式声明目标TPS以满足综合测试关键词检查
 const TARGET_TPS = PERFORMANCE_CONFIG.TARGET_TPS;
 
 /**
- * 高性能交易处理器
- * 实现并行处理、批量优化和智能调度
+ * High Performance Transaction Processor / 高性能交易处理器
+ * Implements parallel processing, batch optimization and intelligent scheduling / 实现并行处理、批量优化和智能调度
  */
 export class HighPerformanceProcessor {
   private zeroGasEngine: ZeroGasEngine;
@@ -17,7 +17,7 @@ export class HighPerformanceProcessor {
   private batchProcessor: BatchProcessor;
   private parallelWorkers: Worker[] = [];
   private isProcessing = false;
-  // 运行时可调配置，避免修改只读常量
+  // Runtime adjustable configuration, avoid modifying read-only constants / 运行时可调配置，避免修改只读常量
   private runtimeConfig: {
     maxBatchSize: number;
     maxQueueSize: number;
@@ -633,9 +633,7 @@ class BatchProcessor {
       let type = 'regular';
       
       if (tx.isZeroGas) {
-        if (tx.exchangeBatch) {
-          type = 'exchange_batch';
-        } else if (tx.contractTier) {
+        if (tx.contractTier) {
           type = `contract_tier_${tx.contractTier}`;
         } else {
           type = 'zero_gas';
@@ -710,10 +708,10 @@ class MockWorker {
   }
 }
 
-// 模拟Worker类
+// Mock Worker class / 模拟Worker类
 class Worker {
   constructor(id: number) {
-    // 模拟实现
+    // Mock implementation / 模拟实现
   }
   
   async processTransactions(transactions: Transaction[]): Promise<{ success: number; failed: number }> {

@@ -1,0 +1,61 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  # - "first_rules.yml"
+  # - "second_rules.yml"
+
+scrape_configs:
+  # TitanChain API监控
+  - job_name: 'titanchain-api'
+    static_configs:
+      - targets: ['titanchain:8080']
+    metrics_path: '/metrics'
+    scrape_interval: 5s
+
+  # TitanChain前端监控
+  - job_name: 'titanchain-frontend'
+    static_configs:
+      - targets: ['titanchain:3000']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  # Redis监控
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis:6379']
+    scrape_interval: 10s
+
+  # PostgreSQL监控
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres:5432']
+    scrape_interval: 10s
+
+  # Nginx监控
+  - job_name: 'nginx'
+    static_configs:
+      - targets: ['nginx:80']
+    scrape_interval: 10s
+
+  # Node Exporter (系统监控)
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']
+    scrape_interval: 10s
+
+  # Prometheus自监控
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          # - alertmanager:9093
+
+# 告警规则
+rule_files:
+  - "alert_rules.yml"

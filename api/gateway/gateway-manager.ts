@@ -1,13 +1,13 @@
-import { ApiGateway, ApiGatewayConfig, RouteConfig } from './api-gateway.js';
-import { LoadBalancer, LoadBalanceStrategy } from './load-balancer.js';
-import { ServiceDiscovery, ServiceRegistration, ServiceRegistrationClient } from './service-discovery.js';
-import { HealthChecker, HealthCheckFactory } from './health-checker.js';
+import { APIGateway, APIGatewayConfig } from './api-gateway';
+import { LoadBalancer, LoadBalanceStrategy, ServiceStatus } from './load-balancer';
+import { ServiceDiscovery, ServiceRegistration } from './service-discovery';
+import { HealthChecker, HealthCheckConfig, HealthCheckType } from './health-checker';
 
 /**
- * 网关管理器配置
+ * Gateway Manager Configuration / 网关管理器配置
  */
 export interface GatewayManagerConfig {
-  gateway: ApiGatewayConfig;
+  gateway: APIGatewayConfig;
   serviceDiscovery?: {
     heartbeatInterval?: number;
     defaultTtl?: number;
@@ -20,367 +20,258 @@ export interface GatewayManagerConfig {
 }
 
 /**
- * 网关管理器类
- * 统一管理API网关、负载均衡、服务发现和健康检查
+ * Gateway Manager class for managing API Gateway, Service Discovery, and Health Checking
+ * 网关管理器类，用于管理API网关、服务发现和健康检查
  */
 export class GatewayManager {
-  private apiGateway: ApiGateway;
+  private apiGateway: APIGateway;
   private serviceDiscovery: ServiceDiscovery;
   private healthChecker: HealthChecker;
-  private registrationClients: ServiceRegistrationClient[] = [];
   private isStarted = false;
 
   constructor(private config: GatewayManagerConfig) {
-    // 初始化服务发现
-    this.serviceDiscovery = new ServiceDiscovery(config.serviceDiscovery);
-    
-    // 初始化健康检查器
+    // Initialize components / 初始化组件
+    this.apiGateway = new APIGateway(config.gateway);
+    this.serviceDiscovery = new ServiceDiscovery();
     this.healthChecker = new HealthChecker();
-    
-    // 初始化API网关
-    this.apiGateway = new ApiGateway(config.gateway);
-    
+
+    // Setup event handlers / 设置事件处理程序
     this.setupEventHandlers();
+    
+    // Setup health checks / 设置健康检查
     this.setupHealthChecks();
   }
 
   /**
-   * 设置事件处理器
+   * Setup event handlers for service discovery / 为服务发现设置事件处理程序
    */
   private setupEventHandlers(): void {
-    // 监听服务发现事件
-    this.serviceDiscovery.on('serviceRegistered', (instance) => {
-      console.log(`📡 服务已注册: ${instance.serviceName}/${instance.id}`);
+    // Listen for service registration events / 监听服务注册事件
+    this.serviceDiscovery.on('service_registered', (event) => {
+      console.log(`Service registered: ${event.serviceName}`);
     });
 
-    this.serviceDiscovery.on('serviceDeregistered', (instance) => {
-      console.log(`📡 服务已注销: ${instance.serviceName}/${instance.id}`);
+    // Listen for service deregistration events / 监听服务注销事件
+    this.serviceDiscovery.on('service_deregistered', (event) => {
+      console.log(`Service deregistered: ${event.serviceName}`);
     });
 
-    this.serviceDiscovery.on('serviceHealthChanged', (instance) => {
-      console.log(`📡 服务健康状态变化: ${instance.serviceName}/${instance.id}`);
-    });
-
-    // 监听健康检查事件
-    this.healthChecker.on('checkFailed', (result) => {
-      console.warn(`🏥 健康检查失败: ${result.name} - ${result.error}`);
+    // Listen for health change events / 监听健康状态变化事件
+    this.serviceDiscovery.on('health_changed', (event) => {
+      console.log(`Service health changed: ${event.serviceName} -> ${event.instance.status}`);
     });
   }
 
   /**
-   * 设置健康检查
+   * Setup health checks / 设置健康检查
    */
   private setupHealthChecks(): void {
-    // 添加网关自身的健康检查
+    // Add gateway self health check / 添加网关自身的健康检查
     this.healthChecker.addCheck({
+      id: 'api-gateway-health',
       name: 'api-gateway',
+      type: HealthCheckType.HTTP,
+      target: 'localhost',
       timeout: 1000,
       interval: 30000,
       retries: 0,
-      retryDelay: 0,
-      customCheck: async () => {
-        const metrics = this.apiGateway.getApp();
-        return {
-          name: 'api-gateway',
-          status: 'healthy',
-          responseTime: 0,
-          timestamp: Date.now(),
-          metadata: {
-            uptime: process.uptime(),
-            isStarted: this.isStarted
-          }
-        };
-      }
+      enabled: true
     });
 
-    // 添加服务发现健康检查
+    // Add service discovery health check / 添加服务发现健康检查
     this.healthChecker.addCheck({
+      id: 'service-discovery-health',
       name: 'service-discovery',
+      type: HealthCheckType.HTTP,
+      target: 'localhost',
       timeout: 1000,
       interval: 30000,
       retries: 0,
-      retryDelay: 0,
-      customCheck: async () => {
-        const stats = this.serviceDiscovery.getAllServicesStats();
-        const totalServices = stats.reduce((sum, s) => sum + s.totalInstances, 0);
-        const healthyServices = stats.reduce((sum, s) => sum + s.healthyInstances, 0);
-        
-        let status: 'healthy' | 'unhealthy' | 'degraded' = 'healthy';
-        if (totalServices > 0) {
-          const healthyRatio = healthyServices / totalServices;
-          if (healthyRatio < 0.5) {
-            status = 'unhealthy';
-          } else if (healthyRatio < 0.8) {
-            status = 'degraded';
-          }
-        }
-
-        return {
-          name: 'service-discovery',
-          status,
-          responseTime: 0,
-          timestamp: Date.now(),
-          metadata: {
-            totalServices,
-            healthyServices,
-            serviceNames: this.serviceDiscovery.getServiceNames()
-          }
-        };
-      }
+      enabled: true
     });
   }
 
   /**
-   * 启动网关管理器
+   * Start the gateway manager / 启动网关管理器
    */
   async start(): Promise<void> {
-    try {
-      console.log('🚀 启动网关管理器...');
+    if (this.isStarted) {
+      return;
+    }
 
-      // 自动注册服务
+    try {
+      // Start service discovery / 启动服务发现
+      this.serviceDiscovery.start();
+
+      // Start health checker / 启动健康检查器
+      this.healthChecker.start();
+
+      // Start API gateway / 启动API网关
+      await this.apiGateway.start();
+
+      // Auto-register services if configured / 如果配置了自动注册服务
       if (this.config.autoRegisterServices) {
         for (const registration of this.config.autoRegisterServices) {
-          const client = new ServiceRegistrationClient(this.serviceDiscovery, registration);
-          client.register();
-          this.registrationClients.push(client);
+          await this.serviceDiscovery.registerService(registration);
         }
       }
 
-      // 启动API网关
-      await this.apiGateway.start();
-
-      // 添加健康检查端点到网关
-      const app = this.apiGateway.getApp();
-      app.get('/gateway/health', this.healthChecker.createExpressEndpoint());
-      app.get('/gateway/services', (req, res) => {
-        res.json(this.serviceDiscovery.getAllServicesStats());
-      });
-
       this.isStarted = true;
-      console.log('✅ 网关管理器启动成功');
+      console.log('Gateway Manager started successfully');
 
     } catch (error) {
-      console.error('❌ 网关管理器启动失败:', error);
+      console.error('Failed to start Gateway Manager:', error);
       throw error;
     }
   }
 
   /**
-   * 停止网关管理器
+   * Stop the gateway manager / 停止网关管理器
    */
   async stop(): Promise<void> {
+    if (!this.isStarted) {
+      return;
+    }
+
     try {
-      console.log('🛑 停止网关管理器...');
-
-      // 注销所有服务
-      for (const client of this.registrationClients) {
-        client.deregister();
-      }
-      this.registrationClients = [];
-
-      // 停止各个组件
-      await this.apiGateway.stop();
-      this.serviceDiscovery.stop();
+      // Stop health checker / 停止健康检查器
       this.healthChecker.stop();
 
+      // Stop service discovery / 停止服务发现
+      await this.serviceDiscovery.stop();
+
+      // Stop API gateway / 停止API网关
+      await this.apiGateway.stop();
+
       this.isStarted = false;
-      console.log('✅ 网关管理器已停止');
+      console.log('Gateway Manager stopped successfully');
 
     } catch (error) {
-      console.error('❌ 网关管理器停止失败:', error);
+      console.error('Failed to stop Gateway Manager:', error);
       throw error;
     }
   }
 
   /**
-   * 添加路由
-   */
-  addRoute(route: RouteConfig): void {
-    this.apiGateway.addRoute(route);
-  }
-
-  /**
-   * 注册服务
+   * Register a service / 注册服务
    */
   registerService(registration: ServiceRegistration): void {
     this.serviceDiscovery.registerService(registration);
   }
 
   /**
-   * 注销服务
+   * Deregister a service / 注销服务
    */
   deregisterService(serviceName: string, instanceId: string): boolean {
-    return this.serviceDiscovery.deregisterService(serviceName, instanceId);
+    this.serviceDiscovery.deregisterService(serviceName, instanceId);
+    return true;
   }
 
   /**
-   * 添加健康检查
+   * Add health check / 添加健康检查
    */
   addHealthCheck(name: string, url: string): void {
-    const check = HealthCheckFactory.httpService(name, url);
+    const check: HealthCheckConfig = {
+      id: `custom-${name}`,
+      name: name,
+      type: HealthCheckType.HTTP,
+      target: url,
+      timeout: 5000,
+      interval: 30000,
+      retries: 3,
+      enabled: true
+    };
     this.healthChecker.addCheck(check);
   }
 
   /**
-   * 获取网关统计信息
+   * Get gateway statistics / 获取网关统计信息
    */
   getStats() {
-    const health = this.healthChecker.getOverallHealth();
-    const services = this.serviceDiscovery.getAllServicesStats();
+    const health = this.healthChecker.getOverallStatus();
+    const serviceStats = this.serviceDiscovery.getStats();
+    
+    // Calculate healthy instances from service stats / 从服务统计中计算健康实例数
+    const healthyInstances = serviceStats.healthyServices;
     
     return {
       gateway: {
         isStarted: this.isStarted,
         uptime: process.uptime(),
-        health: health.status
+        health: health
       },
       services: {
-        total: services.length,
-        instances: services.reduce((sum, s) => sum + s.totalInstances, 0),
-        healthy: services.reduce((sum, s) => sum + s.healthyInstances, 0)
+        total: serviceStats.totalServices,
+        instances: serviceStats.totalInstances,
+        healthy: healthyInstances
       },
       health: {
-        overall: health.status,
-        checks: health.summary
+        overall: health,
+        checks: this.healthChecker.getSummary()
       }
     };
   }
 
   /**
-   * 获取服务发现实例
+   * Get service discovery instance / 获取服务发现实例
    */
   getServiceDiscovery(): ServiceDiscovery {
     return this.serviceDiscovery;
   }
 
   /**
-   * 获取健康检查器实例
+   * Get health checker instance / 获取健康检查器实例
    */
   getHealthChecker(): HealthChecker {
     return this.healthChecker;
   }
 
   /**
-   * 获取API网关实例
+   * Get API gateway instance / 获取API网关实例
    */
-  getApiGateway(): ApiGateway {
+  getApiGateway(): APIGateway {
     return this.apiGateway;
   }
 }
 
 /**
- * 创建默认网关配置
+ * Create default gateway configuration / 创建默认网关配置
  */
 export function createDefaultGatewayConfig(port: number = 8080): GatewayManagerConfig {
   return {
     gateway: {
       port,
-      routes: [
-        {
-          path: '/api/blockchain',
-          serviceName: 'blockchain-service',
-          methods: ['GET', 'POST'],
-          timeout: 30000,
-          retries: 2,
-          circuitBreaker: {
-            threshold: 5,
-            timeout: 30000,
-            resetTimeout: 60000
-          }
-        },
-        {
-          path: '/api/wallet',
-          serviceName: 'wallet-service',
-          methods: ['GET', 'POST'],
-          auth: true,
-          timeout: 15000,
-          rateLimit: {
-            windowMs: 60000,
-            max: 100
-          }
-        },
-        {
-          path: '/api/explorer',
-          serviceName: 'explorer-service',
-          methods: ['GET'],
-          timeout: 10000,
-          rateLimit: {
-            windowMs: 60000,
-            max: 200
-          }
-        }
-      ],
-      loadBalancer: {
-        strategy: LoadBalanceStrategy.WEIGHTED_ROUND_ROBIN,
-        healthCheckInterval: 15000,
-        healthCheckTimeout: 5000
-      },
-      security: {
-        enableHelmet: true,
-        enableCors: true,
-        corsOptions: {
-          origin: ['http://localhost:3000', 'http://localhost:5173'],
-          credentials: true
-        }
-      },
-      rateLimit: {
-        windowMs: 60000,
-        max: 1000,
-        message: 'Too many requests from this IP'
-      },
-      logging: {
-        enabled: true,
-        level: 'info'
-      }
+      corsOrigins: ['*'],
+      rateLimitWindowMs: 15 * 60 * 1000, // 15 minutes / 15分钟
+      rateLimitMaxRequests: 100, // limit each IP to 100 requests per windowMs / 限制每个IP在窗口时间内最多100个请求
+      compressionLevel: 6,
+      healthCheckInterval: 30000,
+      loadBalancingStrategy: LoadBalanceStrategy.ROUND_ROBIN,
+      services: []
     },
     serviceDiscovery: {
       heartbeatInterval: 30000,
       defaultTtl: 60000,
-      cleanupInterval: 10000,
+      cleanupInterval: 60000,
       enableHealthCheck: true,
-      healthCheckInterval: 15000,
+      healthCheckInterval: 30000,
       healthCheckTimeout: 5000
     },
-    autoRegisterServices: [
-      {
-        serviceName: 'blockchain-service',
-        id: 'blockchain-1',
-        host: 'localhost',
-        port: 3001,
-        version: '1.0.0',
-        tags: ['blockchain', 'core'],
-        ttl: 60000
-      },
-      {
-        serviceName: 'explorer-service',
-        id: 'explorer-1',
-        host: 'localhost',
-        port: 3002,
-        version: '1.0.0',
-        tags: ['explorer', 'readonly'],
-        ttl: 60000
-      }
-    ]
+    autoRegisterServices: []
   };
 }
 
 /**
- * 创建生产环境网关配置
+ * Create production gateway configuration / 创建生产环境网关配置
  */
 export function createProductionGatewayConfig(port: number = 80): GatewayManagerConfig {
   const config = createDefaultGatewayConfig(port);
   
-  // 生产环境优化
-  config.gateway.rateLimit.max = 5000;
-  config.gateway.loadBalancer.strategy = LoadBalanceStrategy.LEAST_CONNECTIONS;
-  config.gateway.security.corsOptions = {
-    origin: process.env.ALLOWED_ORIGINS?.split(',') || ['https://titanchain.io'],
-    credentials: true
-  };
-  
-  // 更严格的健康检查
-  config.serviceDiscovery!.healthCheckInterval = 10000;
-  config.serviceDiscovery!.defaultTtl = 30000;
+  // Production-specific settings / 生产环境特定设置
+  config.gateway.rateLimitMaxRequests = 1000;
+  config.gateway.healthCheckInterval = 10000;
+  config.serviceDiscovery!.heartbeatInterval = 15000;
+  config.serviceDiscovery!.healthCheckInterval = 15000;
   
   return config;
 }

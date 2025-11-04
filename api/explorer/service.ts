@@ -42,14 +42,14 @@ export class ExplorerService {
   private validatorManager: ValidatorManager;
   
   constructor() {
-    // 使用全局区块链实例
+    // Use global blockchain instance / 使用全局区块链实例
     this.blockchain = blockchainInstance.getBlockchain();
     this.validatorManager = new ValidatorManager();
   }
   
   async getNetworkStats(): Promise<NetworkStats> {
     try {
-      // 检查区块链实例是否可用
+      // Check if blockchain instance is available / 检查区块链实例是否可用
       if (!this.blockchain) {
         console.warn('Blockchain instance not available, returning default stats');
         return {
@@ -71,7 +71,7 @@ export class ExplorerService {
         blockHeight: blockHeight,
         totalTransactions: networkStats.totalTransactions,
         activeValidators: networkStats.activeValidators,
-        networkHashRate: this.formatHashRate(networkStats.activeValidators * 1000000), // 计算哈希率
+        networkHashRate: this.formatHashRate(networkStats.activeValidators * 1000000), // Calculate hash rate / 计算哈希率
         averageBlockTime: networkStats.averageBlockTime,
         tps: networkStats.currentTPS,
         zeroGasTransactions: networkStats.zeroGasTransactions,
@@ -85,21 +85,21 @@ export class ExplorerService {
   
   async getNetworkHealth(): Promise<NetworkHealth> {
     try {
-      // 获取所有验证节点
+      // Get all validators / 获取所有验证节点
       const totalValidators = await this.validatorManager.getAllValidators();
       const activeValidators = totalValidators.filter(v => v.status === 'active');
       
-      // 计算网络健康指标
+      // Calculate network health metrics / 计算网络健康指标
       const activeValidatorRatio = totalValidators.length > 0 
         ? (activeValidators.length / totalValidators.length) * 100 
         : 0;
       
-      // 计算平均正常运行时间
+      // Calculate average uptime / 计算平均正常运行时间
       const avgUptime = activeValidators.length > 0
         ? activeValidators.reduce((sum, v) => sum + (v.performance?.uptime || 0), 0) / activeValidators.length
         : 0;
       
-      // 确定网络状态
+      // Determine network status / 确定网络状态
       let status: 'healthy' | 'warning' | 'critical' = 'healthy';
       if (activeValidatorRatio < 50) {
         status = 'critical';
@@ -111,8 +111,8 @@ export class ExplorerService {
         status,
         uptime: avgUptime,
         consensusHealth: activeValidatorRatio,
-        networkLatency: 50, // 模拟值
-        syncStatus: 100 // 假设完全同步
+        networkLatency: 50, // Simulated value / 模拟值
+        syncStatus: 100 // Assume fully synced / 假设完全同步
       };
     } catch (error) {
       console.error('Error getting network health:', error);

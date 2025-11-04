@@ -64,28 +64,15 @@ class TitanChainNode {
       this.startStatusMonitoring();
 
       // 启动P2P网络
-      try {
-        this.p2pNode = new P2PNode(this.blockchain, {
-          port: Number(process.env.P2P_PORT || 4001),
-          host: process.env.P2P_HOST || '0.0.0.0',
-          bootnodes: (process.env.BOOTNODES || '').split(',').map(s => s.trim()).filter(Boolean)
-        });
-        await this.p2pNode.start();
-        console.log('🕸️ P2P networking layer started');
-      } catch (p2pError) {
-        console.warn('⚠️ Failed to start P2P networking layer:', p2pError);
-      }
+      // Start P2P network
+      console.log('🕸️ Starting P2P networking layer...');
+      this.p2pNode = new P2PNode(this.blockchain);
+      await this.p2pNode.start();
+      console.log(`✅ P2P network started on port ${process.env.P2P_PORT || 4003}`);
 
-      // 在同一进程中启动API服务，确保能够访问全局blockchain实例
-      try {
-        const { default: app } = await import('../api/app.js');
-        const PORT = process.env.PORT || 3001;
-        app.listen(PORT, () => {
-          console.log(`API Server ready on port ${PORT}`);
-        });
-      } catch (apiError) {
-        console.warn('⚠️ Failed to start API server within node process:', apiError);
-      }
+      // 区块链节点不需要启动API服务器，API服务器应该独立运行
+      // Blockchain node doesn't need to start API server, API server should run independently
+      console.log('🔗 Blockchain instance registered globally and ready for API access');
 
     } catch (error) {
       console.error('❌ Failed to start TitanChain node:', error);

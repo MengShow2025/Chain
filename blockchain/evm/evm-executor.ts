@@ -163,11 +163,6 @@ export class EVMExecutor {
         return BigInt(0);
       }
       
-      // 链下撮合交易完全免费
-      if (tx.exchangeBatch) {
-        return BigInt(0);
-      }
-      
       // 智能合约分层收费（如果有配置）
       if (tx.contractTier) {
         const tierConf = ZERO_GAS_CONFIG.CONTRACT_TIER_FEES[tx.contractTier as keyof typeof ZERO_GAS_CONFIG.CONTRACT_TIER_FEES];

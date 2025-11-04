@@ -1,0 +1,92 @@
+groups:
+  - name: titanchain_alerts
+    rules:
+      # API响应时间告警
+      - alert: HighAPIResponseTime
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "API响应时间过高"
+          description: "API 95%分位响应时间超过1秒，当前值: {{ $value }}秒"
+
+      # 错误率告警
+      - alert: HighErrorRate
+        expr: rate(http_requests_total{status=~"5.."}[5m]) / rate(http_requests_total[5m]) > 0.01
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "API错误率过高"
+          description: "API错误率超过1%，当前值: {{ $value | humanizePercentage }}"
+
+      # 内存使用率告警
+      - alert: HighMemoryUsage
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "内存使用率过高"
+          description: "内存使用率超过80%，当前值: {{ $value | humanizePercentage }}"
+
+      # 磁盘使用率告警
+      - alert: HighDiskUsage
+        expr: (1 - (node_filesystem_avail_bytes / node_filesystem_size_bytes)) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "磁盘使用率过高"
+          description: "磁盘使用率超过80%，当前值: {{ $value | humanizePercentage }}"
+
+      # 服务不可用告警
+      - alert: ServiceDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "服务不可用"
+          description: "服务 {{ $labels.job }} 不可用"
+
+      # 数据库连接告警
+      - alert: DatabaseConnectionFailed
+        expr: pg_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "数据库连接失败"
+          description: "PostgreSQL数据库连接失败"
+
+      # Redis连接告警
+      - alert: RedisConnectionFailed
+        expr: redis_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Redis连接失败"
+          description: "Redis缓存服务连接失败"
+
+      # TPS性能告警
+      - alert: LowTPS
+        expr: rate(titanchain_transactions_total[1m]) < 1000
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "TPS性能低于预期"
+          description: "当前TPS: {{ $value }}，低于1000 TPS阈值"
+
+      # 区块链同步延迟告警
+      - alert: BlockchainSyncDelay
+        expr: (time() - titanchain_last_block_timestamp) > 300
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "区块链同步延迟"
+          description: "最后一个区块时间戳延迟超过5分钟"

@@ -1,4 +1,4 @@
-import { Validator, ValidatorCandidate, RewardTransfer } from '../../shared/types/blockchain.js';
+import { Validator, ValidatorCandidate, RewardTransfer } from '../../shared/types/blockchain';
 import { CompetitiveBlockProduction, BlockProductionResult } from './competitive-block-production.js';
 import { ValidationWorkloadSystem } from './validation-workload-system.js';
 import { CONSENSUS_CONFIG } from '../../shared/constants/blockchain.js';
@@ -113,7 +113,7 @@ export class CompetitiveRewardSystem {
       fromValidator: 'system',
       toValidator: blockProducerAddress,
       amount: reward,
-      type: 'block_production_reward',
+      type: 'block_reward',
       blockNumber,
       timestamp: Date.now(),
       epoch: Math.floor(blockNumber / 100) // 假设每100个区块为一个epoch
@@ -150,7 +150,7 @@ export class CompetitiveRewardSystem {
           fromValidator: 'system',
           toValidator: validatorAddress,
           amount: reward,
-          type: 'validation_work_reward',
+          type: 'staking_reward',
           blockNumber,
           timestamp: Date.now(),
           epoch: Math.floor(blockNumber / 100)

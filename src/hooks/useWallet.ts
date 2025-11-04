@@ -72,6 +72,25 @@ const detectCoinbaseWallet = () => {
   return null;
 };
 
+// Trust Wallet检测函数
+const detectTrustWallet = () => {
+  if (typeof window === 'undefined') return null;
+  
+  const { ethereum } = window as any;
+  
+  if (!ethereum) return null;
+  
+  // 检查是否是Trust Wallet
+  if (ethereum.isTrust) return ethereum;
+  
+  // 如果有多个钱包，尝试找到Trust Wallet
+  if (ethereum.providers) {
+    return ethereum.providers.find((provider: any) => provider.isTrust) || null;
+  }
+  
+  return null;
+};
+
 export const useWalletStore = create<WalletState>()(
   persist(
     (set, get) => ({
@@ -97,6 +116,9 @@ export const useWalletStore = create<WalletState>()(
               break;
             case 'coinbase':
               provider = await connectCoinbaseWallet();
+              break;
+            case 'trust':
+              provider = await connectTrustWallet();
               break;
             default:
               throw new Error('Unsupported wallet type');
@@ -330,9 +352,30 @@ async function connectMetaMask() {
 
 // WalletConnect连接
 async function connectWalletConnect() {
-  // 这里需要实现WalletConnect的连接逻辑
-  // 由于WalletConnect需要额外的配置，这里提供一个简化的实现
-  throw new Error('WalletConnect integration not implemented yet. Please use MetaMask or Coinbase Wallet.');
+  try {
+    // 动态导入WalletConnect
+    const { EthereumProvider } = await import('@walletconnect/ethereum-provider');
+    
+    const provider = await EthereumProvider.init({
+      projectId: process.env.VITE_WALLETCONNECT_PROJECT_ID || 'your-project-id', // 需要在环境变量中配置
+      chains: [1001], // TitanChain chainId
+      showQrModal: true,
+      metadata: {
+        name: 'TitanChain',
+        description: 'TitanChain Wallet Connection',
+        url: 'https://titanchain.io',
+        icons: ['https://titanchain.io/icon.png']
+      }
+    });
+    
+    // 连接钱包
+    await provider.connect();
+    
+    return provider;
+  } catch (error) {
+    console.error('WalletConnect connection failed:', error);
+    throw new Error('Failed to connect with WalletConnect. Please try again.');
+  }
 }
 
 // 优化的Coinbase Wallet连接函数
@@ -370,6 +413,41 @@ async function connectCoinbaseWallet() {
   }
 }
 
+// Trust Wallet连接函数
+async function connectTrustWallet() {
+  if (typeof window === 'undefined') {
+    throw new Error('Window is not defined');
+  }
+  
+  const ethereum = detectTrustWallet();
+  
+  if (!ethereum) {
+    throw new Error('Trust Wallet is not installed. Please install Trust Wallet extension or use Trust Wallet mobile app.');
+  }
+  
+  try {
+    // 使用单一的请求来连接账户
+    const accounts = await ethereum.request({ 
+      method: 'eth_requestAccounts' 
+    });
+    
+    if (!accounts || accounts.length === 0) {
+      throw new Error('No accounts found. Please make sure your wallet is unlocked.');
+    }
+    
+    return ethereum;
+  } catch (error: any) {
+    if (error.code === 4001) {
+      throw new Error('User rejected the connection request.');
+    } else if (error.code === -32002) {
+      throw new Error('Connection request is already pending. Please check your wallet.');
+    } else if (error.code === -32603) {
+      throw new Error('Internal error. Please try again.');
+    }
+    throw error;
+  }
+}
+
 // 获取provider
 function getProvider(walletType: string) {
   if (typeof window === 'undefined') {
@@ -381,8 +459,10 @@ function getProvider(walletType: string) {
       return detectMetaMask();
     case 'coinbase':
       return detectCoinbaseWallet();
+    case 'trust':
+      return detectTrustWallet();
     case 'walletconnect':
-      // WalletConnect provider logic
+      // WalletConnect provider需要特殊处理，因为它不是window.ethereum
       return null;
     default:
       return null;

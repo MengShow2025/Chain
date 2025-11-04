@@ -12,13 +12,14 @@ interface WalletOption {
 
 // Check if wallet is installed
 const checkWalletInstallation = () => {
-  if (typeof window === 'undefined') return { metamask: false, coinbase: false };
+  if (typeof window === 'undefined') return { metamask: false, coinbase: false, trust: false };
   
   const ethereum = (window as any).ethereum;
   
   return {
     metamask: !!(ethereum && ethereum.isMetaMask),
-    coinbase: !!(ethereum && ethereum.isCoinbaseWallet)
+    coinbase: !!(ethereum && ethereum.isCoinbaseWallet),
+    trust: !!(ethereum && ethereum.isTrust)
   };
 };
 
@@ -37,7 +38,7 @@ const WalletConnector: React.FC = () => {
   const [showDropdown, setShowDropdown] = useState(false);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [walletInstalled, setWalletInstalled] = useState({ metamask: false, coinbase: false });
+  const [walletInstalled, setWalletInstalled] = useState({ metamask: false, coinbase: false, trust: false });
   
   // Check wallet installation status
   useEffect(() => {
@@ -86,6 +87,13 @@ const WalletConnector: React.FC = () => {
       icon: '🔵',
       description: 'Connect using Coinbase Wallet',
       installed: walletInstalled.coinbase
+    },
+    {
+      id: 'trust',
+      name: 'Trust Wallet',
+      icon: '🛡️',
+      description: 'Connect using Trust Wallet',
+      installed: walletInstalled.trust
     }
   ];
   
@@ -336,3 +344,4 @@ const WalletConnector: React.FC = () => {
 };
 
 export { WalletConnector };
+export default WalletConnector;

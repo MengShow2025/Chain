@@ -282,3 +282,5 @@ export const ValidatorDetail: React.FC = () => {
     </div>
   );
 };
+
+export default ValidatorDetail;

@@ -1,13 +1,11 @@
 import { Transaction } from '../../shared/types/blockchain.js';
 import { CONTRACT_TIER_FEES, ZERO_GAS_CONFIG, ERROR_CODES } from '../../shared/constants/blockchain.js';
-import { adaptiveBatchController } from '../../shared/utils/adaptive-batch.js';
 
 /**
  * 0-gas费管理器
  * 实现TitanChain的0-gas费交易机制
  */
 export class ZeroGasManager {
-  private exchangeBatchPool: Map<string, Transaction[]> = new Map();
   private contractTierUsage: Map<string, { tier: number; dailyUsage: number; lastReset: number }> = new Map();
   private dailyLimits = {
     1: 100,  // Tier 1: 100次/天
@@ -29,18 +27,13 @@ export class ZeroGasManager {
     tier?: number;
   }> {
     try {
-      // 1. 检查交易所批量处理
-      if (await this.isExchangeBatchEligible(tx)) {
-        return { eligible: true, reason: 'Exchange batch processing' };
-      }
-      
-      // 2. 检查智能合约分层收费
+      // 1. 检查智能合约分层收费
       const tierCheck = await this.checkContractTierEligibility(tx);
       if (tierCheck.eligible) {
         return { eligible: true, reason: 'Contract tier eligible', tier: tierCheck.tier };
       }
       
-      // 3. 检查其他0-gas费条件
+      // 2. 检查其他0-gas费条件
       const specialCheck = await this.checkSpecialConditions(tx);
       if (specialCheck.eligible) {
         return { eligible: true, reason: specialCheck.reason };
@@ -76,9 +69,7 @@ export class ZeroGasManager {
       }
       
       // 根据不同类型处理
-      if (eligibility.reason === 'Exchange batch processing') {
-        return await this.processExchangeBatch(tx);
-      } else if (eligibility.reason === 'Contract tier eligible') {
+      if (eligibility.reason === 'Contract tier eligible') {
         return await this.processContractTier(tx, eligibility.tier!);
       } else {
         return await this.processSpecialCondition(tx);
@@ -95,36 +86,7 @@ export class ZeroGasManager {
     }
   }
   
-  /**
-   * 检查交易所批量处理资格
-   */
-  private async isExchangeBatchEligible(tx: Transaction): Promise<boolean> {
-    // 检查是否为交易所批量交易
-    if (!tx.exchangeBatch) {
-      return false;
-    }
-    
-    // 检查交易所是否在白名单中
-    const exchangeAddress = this.extractExchangeAddress(tx);
-    if (!this.isWhitelistedExchange(exchangeAddress)) {
-      return false;
-    }
-    
-    // 检查批量交易的最小数量
-    const batchSize = this.getBatchSize(tx);
-    // 使用自适应批量大小阈值
-    const currentSizeThreshold = adaptiveBatchController.getState().sizeThreshold;
-    if (batchSize < currentSizeThreshold) {
-      return false;
-    }
-    
-    // 检查交易类型（只有特定类型的交易可以批量免费）
-    if (!this.isEligibleTransactionType(tx)) {
-      return false;
-    }
-    
-    return true;
-  }
+
   
   /**
    * 检查智能合约分层收费资格
@@ -183,24 +145,7 @@ export class ZeroGasManager {
     return { eligible: false };
   }
   
-  /**
-   * 处理交易所批量交易
-   */
-  private async processExchangeBatch(tx: Transaction): Promise<{
-    success: boolean;
-    actualGasFee: bigint;
-    subsidized: bigint;
-    error?: string;
-  }> {
-    const originalGasFee = tx.gas * tx.gasPrice;
-    
-    // 交易所批量处理完全免费
-    return {
-      success: true,
-      actualGasFee: BigInt(0),
-      subsidized: originalGasFee
-    };
-  }
+
   
   /**
    * 处理智能合约分层收费
@@ -243,51 +188,7 @@ export class ZeroGasManager {
     };
   }
   
-  /**
-   * 提取交易所地址
-   */
-  private extractExchangeAddress(tx: Transaction): string {
-    // 从交易数据中提取交易所地址
-    // 简化实现：假设from地址就是交易所地址
-    return tx.from;
-  }
-  
-  /**
-   * 检查是否为白名单交易所
-   */
-  private isWhitelistedExchange(address: string): boolean {
-    const whitelistedExchanges = [
-      '0x1234567890123456789012345678901234567890', // 示例交易所地址
-      '0x2345678901234567890123456789012345678901',
-      '0x3456789012345678901234567890123456789012'
-    ];
-    
-    return whitelistedExchanges.includes(address.toLowerCase());
-  }
-  
-  /**
-   * 获取批量交易大小
-   */
-  private getBatchSize(tx: Transaction): number {
-    // 从交易数据中解析批量大小
-    // 简化实现：假设数据长度代表批量大小
-    return Math.floor(tx.data.length / 100);
-  }
-  
-  /**
-   * 检查是否为符合条件的交易类型
-   */
-  private isEligibleTransactionType(tx: Transaction): boolean {
-    // 检查交易类型是否符合批量免费条件
-    const eligibleTypes = [
-      '0xa9059cbb', // transfer
-      '0x23b872dd', // transferFrom
-      '0x095ea7b3'  // approve
-    ];
-    
-    const methodSignature = tx.data.substring(0, 10);
-    return eligibleTypes.includes(methodSignature);
-  }
+
   
   /**
    * 检查是否为合约地址
@@ -392,17 +293,10 @@ export class ZeroGasManager {
     const oneDayMs = 24 * 60 * 60 * 1000;
     
     // 清理过期的合约等级使用记录
-    for (const [key, usage] of this.contractTierUsage.entries()) {
+    const entries = Array.from(this.contractTierUsage.entries());
+    for (const [key, usage] of entries) {
       if (now - usage.lastReset > oneDayMs * 7) { // 保留7天的记录
         this.contractTierUsage.delete(key);
-      }
-    }
-    
-    // 清理过期的批量交易池
-    for (const [key, transactions] of this.exchangeBatchPool.entries()) {
-      const oldestTx = transactions[0];
-      if (oldestTx && now - oldestTx.timestamp > 60 * 60 * 1000) { // 1小时过期
-        this.exchangeBatchPool.delete(key);
       }
     }
   }
@@ -413,13 +307,11 @@ export class ZeroGasManager {
   getZeroGasStats(): {
     totalZeroGasTransactions: number;
     totalGasSubsidized: bigint;
-    exchangeBatchCount: number;
     contractTierUsage: Map<string, any>;
   } {
     return {
       totalZeroGasTransactions: 0, // 需要实现计数器
       totalGasSubsidized: BigInt(0), // 需要实现累计器
-      exchangeBatchCount: this.exchangeBatchPool.size,
       contractTierUsage: new Map(this.contractTierUsage)
     };
   }
@@ -428,25 +320,10 @@ export class ZeroGasManager {
    * 重置统计信息
    */
   resetStats(): void {
-    this.exchangeBatchPool.clear();
     this.contractTierUsage.clear();
   }
   
-  /**
-   * 添加白名单交易所
-   */
-  addWhitelistedExchange(address: string): void {
-    // 实际实现需要持久化存储
-    console.log(`Added whitelisted exchange: ${address}`);
-  }
-  
-  /**
-   * 移除白名单交易所
-   */
-  removeWhitelistedExchange(address: string): void {
-    // 实际实现需要持久化存储
-    console.log(`Removed whitelisted exchange: ${address}`);
-  }
+
   
   /**
    * 设置合约等级

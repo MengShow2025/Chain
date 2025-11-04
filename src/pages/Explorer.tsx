@@ -43,40 +43,35 @@ export const Explorer: React.FC = () => {
   
   const fetchNetworkStats = async () => {
     try {
-      // 模拟API调用
-      const response = await fetch('/api/network/stats');
+      // 使用正确的API端点 / Use correct API endpoint
+      const response = await fetch('http://localhost:3001/api/blockchain/stats');
       if (response.ok) {
-        const data = await response.json();
+        const result = await response.json();
         
-        // 确保所有必需的字段都存在，提供默认值
-        const safeStats: ExplorerStats = {
-          blockHeight: data.blockHeight ?? 0,
-          totalTransactions: data.totalTransactions ?? 0,
-          activeValidators: data.activeValidators ?? 0,
-          networkHashRate: data.networkHashRate ?? '0 H/s',
-          averageBlockTime: data.averageBlockTime ?? 0,
-          tps: data.tps ?? 0,
-          zeroGasTransactions: data.zeroGasTransactions ?? 0,
-          totalStaked: data.totalStaked ?? '0'
-        };
-        
-        setStats(safeStats);
+        if (result.success && result.data) {
+          // 使用API返回的数据 / Use data returned from API
+          const data = result.data;
+          const safeStats: ExplorerStats = {
+            blockHeight: data.blockHeight ?? 0,
+            totalTransactions: data.totalTransactions ?? 0,
+            activeValidators: data.activeValidators ?? 0,
+            networkHashRate: data.networkHashRate ?? '0 H/s',
+            averageBlockTime: data.averageBlockTime ?? 0,
+            tps: data.tps ?? 0,
+            zeroGasTransactions: data.zeroGasTransactions ?? 0,
+            totalStaked: data.totalStaked ?? '0'
+          };
+          
+          setStats(safeStats);
+        } else {
+          throw new Error('Invalid API response format');
+        }
       } else {
-        // 使用模拟数据
-        setStats({
-          blockHeight: 1234567,
-          totalTransactions: 9876543,
-          activeValidators: 108,
-          networkHashRate: '1.2 TH/s',
-          averageBlockTime: 2.1,
-          tps: 185432,
-          zeroGasTransactions: 2345678,
-          totalStaked: '50000000'
-        });
+        throw new Error(`API request failed with status: ${response.status}`);
       }
     } catch (error) {
       console.error('Failed to fetch network stats:', error);
-      // 使用模拟数据
+      // 使用模拟数据作为后备 / Use mock data as fallback
       setStats({
         blockHeight: 1234567,
         totalTransactions: 9876543,
@@ -287,3 +282,5 @@ export const Explorer: React.FC = () => {
     </div>
   );
 };
+
+export default Explorer;

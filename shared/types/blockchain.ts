@@ -1,4 +1,19 @@
-// TitanChain 区块链核心类型定义
+// TitanChain blockchain core type definitions / TitanChain 区块链核心类型定义
+
+export interface BlockHeader {
+  number: number;
+  height: number; // Block height / 区块高度
+  hash: string;
+  parentHash: string;
+  timestamp: number;
+  validator: string;
+  proposer?: string; // Block proposer / 区块提议者
+  stateRoot: string;
+  transactionsRoot: string;
+  receiptsRoot: string;
+  difficulty: bigint;
+  nonce: string;
+}
 
 export interface Block {
   number: number;
@@ -16,37 +31,31 @@ export interface Block {
   nonce: string;
   size: number;
   reward: bigint;
+  header?: BlockHeader; // Optional block header / 可选的区块头
 }
 
 export interface Transaction {
+  id: string; // Transaction unique identifier / 交易唯一标识符
   hash: string;
   from: string;
   to: string;
   value: bigint;
   gas: bigint;
   gasPrice: bigint;
+  gasLimit: bigint; // Gas limit for transaction / 交易Gas限制
   data: string;
   nonce: number;
-  timestamp: number; // 交易时间戳
+  timestamp: number; // Transaction timestamp / 交易时间戳
   blockNumber?: number;
   blockHash?: string;
   transactionIndex?: number;
   status: 'pending' | 'confirmed' | 'failed';
-  isZeroGas: boolean; // TitanChain 0-gas费标识
-  exchangeBatch?: ExchangeBatch; // 交易所批量交易信息
-  contractTier?: number; // 智能合约分层收费等级
+  signature: string; // Transaction signature / 交易签名
+  isZeroGas: boolean; // TitanChain zero-gas fee identifier / TitanChain 0-gas费标识
+  contractTier?: number; // Smart contract tiered charging level / 智能合约分层收费等级
 }
 
-export interface ExchangeBatch {
-  batchId: string;
-  exchangeId: string;
-  totalTransactions: number;
-  totalVolume: bigint;
-  timestamp: number;
-  transactions: string[]; // 交易哈希列表
-  status: 'pending' | 'processing' | 'completed' | 'failed' | 'ready' | 'processed';
-  createdAt: number;
-}
+
 
 export interface Validator {
   address: string;
@@ -54,7 +63,7 @@ export interface Validator {
   stake: bigint;
   delegatedStake: bigint;
   totalStake: bigint;
-  commission: number; // 佣金比例 (0-100)
+  commission: number; // Commission rate (0-100) / 佣金比例 (0-100)
   status: 'active' | 'inactive' | 'jailed' | 'candidate';
   performance: ValidatorPerformance;
   metadata: ValidatorMetadata;
@@ -65,11 +74,11 @@ export interface Validator {
 export interface ValidatorPerformance {
   blocksProduced: number;
   blocksExpected: number;
-  uptime: number; // 在线时间百分比
+  uptime: number; // Online time percentage / 在线时间百分比
   missedBlocks: number;
   slashingEvents: number;
   averageBlockTime: number;
-  score: number; // 综合评分 (0-100)
+  score: number; // Comprehensive score (0-100) / 综合评分 (0-100)
 }
 
 export interface ValidatorMetadata {
@@ -78,9 +87,9 @@ export interface ValidatorMetadata {
   website?: string;
   identity?: string;
   details?: string;
-  // 候选/验证节点在本地计算的排名（可选）
+  // Candidate/validator locally computed ranking (optional) / 候选/验证节点在本地计算的排名（可选）
   ranking?: number;
-  // 维护信息（可选）：移除原因与时间
+  // Maintenance information (optional): removal reason and time / 维护信息（可选）：移除原因与时间
   removalReason?: string;
   removedAt?: number;
 }
@@ -92,10 +101,10 @@ export interface CandidateNode {
   delegatedStake: bigint;
   totalStake: bigint;
   commission: number;
-  ranking: number; // 候补节点排名 (1-2000)
+  ranking: number; // Candidate node ranking (1-2000) / 候补节点排名 (1-2000)
   metadata: ValidatorMetadata;
   applicationTime: number;
-  readinessScore: number; // 准备度评分
+  readinessScore: number; // Readiness score / 准备度评分
 }
 
 export interface StakingInfo {
@@ -120,7 +129,7 @@ export interface NetworkStats {
   networkHealth: 'excellent' | 'good' | 'warning' | 'critical';
   averageBlockTime: number;
   zeroGasTransactions: number;
-  exchangeBatchTransactions: number;
+
 }
 
 export interface ConsensusState {
@@ -349,47 +358,27 @@ export interface ValidatorTransition {
   penaltyApplied: bigint;
 }
 
-// 批次承诺与验证相关类型（链下撮合 → 链上校验）
 export interface BatchCommit {
-  // 元信息
   batchId: string;
-  producerId?: string;
-  timestamp?: number;
-  prevStateRoot?: string;
-
-  // 数据根（Merkle commitments）
-  ordersRoot?: string;
-  matchesRoot?: string;
-  cancellationsRoot?: string;
-  balanceDiffsRoot?: string;
-  auditLogRoot?: string;
-
-  // 流动性与费用相关根
-  liquidityMetaRoot?: string;
-  feeReceiptsRoot?: string;
-  distributionPlanRoot?: string;
-  gasCostRoot?: string;
-  sponsorAccountsRoot?: string;
-
-  // 状态根
-  nextStateRoot?: string;
-
-  // 数据可用性
-  cid?: string; // 内容地址（IPFS/Blob 等）
-
-  // 见证与签名
-  producerSig?: string;
-  witnessSigs?: string[]; // 简化：阈值校验
-
-  // 执行配方版本
-  recipeVersion?: number;
+  producerId: string;
+  timestamp: number;
+  ordersRoot: string;
+  matchesRoot: string;
+  balanceDiffsRoot: string;
+  auditLogRoot: string;
+  nextStateRoot?: string; // Next state root / 下一个状态根
+  liquidityMetaRoot?: string; // Liquidity metadata root / 流动性元数据根
+  feeReceiptsRoot?: string; // Fee receipts root / 费用收据根
+  distributionPlanRoot?: string; // Distribution plan root / 分配计划根
+  cancellationsRoot?: string; // Cancellations root / 取消根
+  gasCostRoot?: string; // Gas cost root / Gas成本根
+  sponsorAccountsRoot?: string; // Sponsor accounts root / 赞助账户根
+  prevStateRoot?: string; // Previous state root / 前一个状态根
+  cid?: string;
+  recipeVersion: number;
 }
 
-export interface BatchStatus {
-  batchId: string;
-  status: 'received' | 'validated' | 'invalid' | 'processing' | 'committed' | 'failed';
-  validationErrors?: string[];
-  witnessesCollected?: number;
-  nextStateRoot?: string;
-  timestamp: number;
+export interface Event {
+  type: string;
+  data: any; // Event data payload / 事件数据载荷
 }

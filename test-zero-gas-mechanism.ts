@@ -1,9 +1,9 @@
 /**
  * TitanChain 真正0-gas费机制测试
- * 验证原生代币和链下撮合交易的真正免费体验
+ * 验证原生代币交易的真正免费体验
  */
 
-import { Transaction, ExchangeBatch } from './shared/types/blockchain.js';
+import { Transaction } from './shared/types/blockchain.js';
 import { EVMExecutor } from './blockchain/evm/evm-executor.js';
 import { shouldBeZeroGasTransaction, markZeroGasTransaction, isNativeTokenTransaction } from './shared/utils/native-token-utils.js';
 
@@ -24,7 +24,6 @@ class ZeroGasMechanismTest {
 
     try {
       await this.testNativeTokenZeroGas();
-      await this.testExchangeBatchZeroGas();
       await this.testRegularTransactionGas();
       await this.testUserBalanceAfterZeroGas();
       await this.testAutoMarkingMechanism();
@@ -108,77 +107,7 @@ class ZeroGasMechanismTest {
     }
   }
 
-  /**
-   * 测试链下撮合交易0-gas费
-   */
-  async testExchangeBatchZeroGas() {
-    console.log('\n=== 测试链下撮合交易0-gas费机制 ===');
 
-    const userAddress = '0x2234567890123456789012345678901234567890';
-    const exchangeAddress = '0x3234567890123456789012345678901234567890';
-    
-    await this.evmExecutor.createAccount(userAddress, BigInt(1000));
-    await this.evmExecutor.createAccount(exchangeAddress, BigInt(0));
-
-    const initialBalance = await this.evmExecutor.getAccountBalance(userAddress);
-
-    // 创建链下撮合交易
-    const exchangeBatch: ExchangeBatch = {
-      batchId: 'batch_001',
-      exchangeId: 'binance',
-      totalTransactions: 10,
-      totalVolume: BigInt(5000),
-      timestamp: Date.now(),
-      transactions: [],
-      status: 'processing',
-      createdAt: Date.now()
-    };
-
-    const tx: Transaction = {
-      hash: '0xbatch001' + Date.now(),
-      from: userAddress,
-      to: exchangeAddress,
-      value: BigInt(200),
-      gas: BigInt(50000),
-      gasPrice: BigInt(20000000000),
-      data: '0xbatchprocess',
-      nonce: 0,
-      timestamp: Date.now(),
-      status: 'pending' as const,
-      isZeroGas: false,
-      exchangeBatch
-    };
-
-    // 执行交易
-    const result = await this.evmExecutor.executeTransaction(tx);
-    
-    // 检查交易后余额
-    const finalBalance = await this.evmExecutor.getAccountBalance(userAddress);
-    const actualGasPaid = initialBalance - finalBalance - tx.value;
-
-    // 验证结果
-    const passed = result.success && actualGasPaid === BigInt(0);
-    
-    this.testResults.push({
-      test: '链下撮合交易 - 0-gas费验证',
-      passed,
-      expected: '用户不支付gas费',
-      actual: `用户支付gas费: ${actualGasPaid}`,
-      details: {
-        batchId: exchangeBatch.batchId,
-        exchangeId: exchangeBatch.exchangeId,
-        gasPaid: actualGasPaid.toString(),
-        isZeroGas: tx.isZeroGas
-      }
-    });
-
-    console.log(`${passed ? '✅' : '❌'} 链下撮合交易0-gas费`);
-    console.log(`   批次ID: ${exchangeBatch.batchId}`);
-    console.log(`   交易所: ${exchangeBatch.exchangeId}`);
-    console.log(`   实际支付gas费: ${actualGasPaid} (期望: 0)`);
-    console.log(`   交易成功: ${result.success}`);
-    console.log(`   自动标记为0-gas: ${tx.isZeroGas}`);
-  }
 
   /**
    * 测试普通交易仍需支付gas费

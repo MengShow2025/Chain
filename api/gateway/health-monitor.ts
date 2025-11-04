@@ -1,641 +1,702 @@
+// Health Monitor service for comprehensive system monitoring / 综合系统监控的健康监控服务
 import { EventEmitter } from 'events';
-import { ServiceInstance, ServiceStatus } from './load-balancer';
+import { HealthChecker, HealthCheckConfig as BaseHealthCheckConfig, HealthCheckResult as BaseHealthCheckResult, HealthStatus } from './health-checker';
 
-/**
- * 健康检查类型
- */
-export enum HealthCheckType {
-  HTTP = 'http',
-  TCP = 'tcp',
-  GRPC = 'grpc',
+// Extended health check types / 扩展健康检查类型
+export enum SystemHealthCheckType {
+  MEMORY = 'memory',
+  CPU = 'cpu',
+  DISK = 'disk',
   CUSTOM = 'custom'
 }
 
-/**
- * 健康检查配置
- */
-export interface HealthCheckConfig {
+// Extended health check configuration interface / 扩展健康检查配置接口
+export interface SystemHealthCheckConfig {
   id: string;
   name: string;
-  type: HealthCheckType;
-  target: string; // URL, 地址或自定义标识
-  interval: number; // 检查间隔（毫秒）
-  timeout: number; // 超时时间（毫秒）
-  retries: number; // 重试次数
-  successThreshold: number; // 连续成功次数阈值
-  failureThreshold: number; // 连续失败次数阈值
-  headers?: Record<string, string>; // HTTP 头部
-  expectedStatus?: number; // 期望的HTTP状态码
-  expectedResponse?: string; // 期望的响应内容
-  customCheck?: (target: string) => Promise<boolean>; // 自定义检查函数
+  type: SystemHealthCheckType;
+  target: string;
+  interval: number;
+  timeout: number;
+  retries: number;
+  enabled: boolean;
+  thresholds?: HealthThresholds;
+  metadata?: Record<string, any>;
 }
 
-/**
- * 健康检查结果
- */
-export interface HealthCheckResult {
-  checkId: string;
-  target: string;
-  success: boolean;
+// Health thresholds for different metrics / 不同指标的健康阈值
+export interface HealthThresholds {
+  warning: number;
+  critical: number;
+  unit?: string;
+}
+
+// Extended health check result interface / 扩展健康检查结果接口
+export interface SystemHealthCheckResult {
+  id: string;
+  name: string;
+  status: HealthStatus;
+  value?: number;
   responseTime: number;
   timestamp: number;
   error?: string;
-  statusCode?: number;
-  response?: string;
+  details?: Record<string, any>;
 }
 
-/**
- * 健康状态历史
- */
+// Health history entry / 健康历史记录条目
 export interface HealthHistory {
-  target: string;
-  results: HealthCheckResult[];
-  currentStatus: ServiceStatus;
-  consecutiveSuccesses: number;
-  consecutiveFailures: number;
-  lastStatusChange: number;
-  uptime: number;
-  downtime: number;
+  timestamp: number;
+  status: HealthStatus;
+  value?: number;
+  responseTime: number;
+  error?: string;
 }
 
-/**
- * 健康监控统计
- */
+// Health monitor statistics / 健康监控统计
 export interface HealthMonitorStats {
   totalChecks: number;
   activeChecks: number;
-  successfulChecks: number;
-  failedChecks: number;
+  healthyChecks: number;
+  warningChecks: number;
+  criticalChecks: number;
   averageResponseTime: number;
-  uptimePercentage: number;
-  checksPerMinute: number;
+  uptime: number;
+  lastCheckTime: number;
 }
 
-/**
- * 健康监控器
- */
-export class HealthMonitor extends EventEmitter {
-  private checks: Map<string, HealthCheckConfig>;
-  private intervals: Map<string, NodeJS.Timeout>;
-  private history: Map<string, HealthHistory>;
-  private stats: HealthMonitorStats;
-  private maxHistorySize: number;
-  private isRunning: boolean;
+// System metrics interface / 系统指标接口
+export interface SystemMetrics {
+  memory: {
+    used: number;
+    total: number;
+    percentage: number;
+    available: number;
+  };
+  cpu: {
+    usage: number;
+    loadAverage: number[];
+    cores: number;
+  };
+  disk: {
+    used: number;
+    total: number;
+    percentage: number;
+    available: number;
+  };
+  network: {
+    bytesIn: number;
+    bytesOut: number;
+    packetsIn: number;
+    packetsOut: number;
+  };
+  process: {
+    pid: number;
+    uptime: number;
+    memoryUsage: NodeJS.MemoryUsage;
+    cpuUsage: NodeJS.CpuUsage;
+  };
+}
 
-  constructor(maxHistorySize: number = 100) {
+// Health monitor configuration / 健康监控配置
+export interface HealthMonitorConfig {
+  enabled: boolean;
+  checkInterval: number;
+  historyRetention: number;
+  alertThresholds: {
+    consecutiveFailures: number;
+    responseTimeThreshold: number;
+  };
+  systemMetrics: {
+    enabled: boolean;
+    interval: number;
+  };
+  notifications: {
+    enabled: boolean;
+    webhookUrl?: string;
+    emailRecipients?: string[];
+  };
+}
+
+// Main Health Monitor class / 主要健康监控类
+export class HealthMonitor extends EventEmitter {
+  private config: HealthMonitorConfig;
+  private healthChecker: HealthChecker;
+  private systemChecks: Map<string, SystemHealthCheckConfig> = new Map();
+  private results: Map<string, SystemHealthCheckResult> = new Map();
+  private history: Map<string, HealthHistory[]> = new Map();
+  private stats: HealthMonitorStats;
+  private systemMetrics?: SystemMetrics;
+  private monitorTimer?: NodeJS.Timeout;
+  private metricsTimer?: NodeJS.Timeout;
+  private isRunning = false;
+
+  constructor(config: HealthMonitorConfig) {
     super();
-    
-    this.checks = new Map();
-    this.intervals = new Map();
-    this.history = new Map();
-    this.maxHistorySize = maxHistorySize;
-    this.isRunning = false;
+    this.config = { ...config };
+    this.healthChecker = new HealthChecker();
     
     this.stats = {
       totalChecks: 0,
       activeChecks: 0,
-      successfulChecks: 0,
-      failedChecks: 0,
+      healthyChecks: 0,
+      warningChecks: 0,
+      criticalChecks: 0,
       averageResponseTime: 0,
-      uptimePercentage: 0,
-      checksPerMinute: 0
+      uptime: 0,
+      lastCheckTime: 0
     };
+
+    this.setupHealthChecker();
+    this.setupSystemChecks();
+  }
+
+  // Setup health checker event handlers / 设置健康检查器事件处理程序
+  private setupHealthChecker(): void {
+    this.healthChecker.on('check_completed', (result: BaseHealthCheckResult) => {
+      this.handleStandardCheckResult(result);
+    });
+
+    this.healthChecker.on('status_changed', (event: any) => {
+      this.handleStatusChange(event);
+    });
+  }
+
+  // Setup default system health checks / 设置默认系统健康检查
+  private setupSystemChecks(): void {
+    // Memory usage check / 内存使用检查
+    this.addSystemCheck({
+      id: 'system_memory',
+      name: 'System Memory Usage',
+      type: SystemHealthCheckType.MEMORY,
+      target: 'memory',
+      interval: 30000,
+      timeout: 1000,
+      retries: 0,
+      enabled: true,
+      thresholds: {
+        warning: 80,
+        critical: 95,
+        unit: '%'
+      }
+    });
+
+    // CPU usage check / CPU使用检查
+    this.addSystemCheck({
+      id: 'system_cpu',
+      name: 'System CPU Usage',
+      type: SystemHealthCheckType.CPU,
+      target: 'cpu',
+      interval: 30000,
+      timeout: 1000,
+      retries: 0,
+      enabled: true,
+      thresholds: {
+        warning: 80,
+        critical: 95,
+        unit: '%'
+      }
+    });
+
+    // Disk usage check / 磁盘使用检查
+    this.addSystemCheck({
+      id: 'system_disk',
+      name: 'System Disk Usage',
+      type: SystemHealthCheckType.DISK,
+      target: '/',
+      interval: 60000,
+      timeout: 1000,
+      retries: 0,
+      enabled: true,
+      thresholds: {
+        warning: 85,
+        critical: 95,
+        unit: '%'
+      }
+    });
+  }
+
+  // Add standard health check / 添加标准健康检查
+  addHealthCheck(config: BaseHealthCheckConfig): void {
+    this.healthChecker.addCheck(config);
+    console.log(`Health monitor: Standard check added ${config.name} (${config.id})`);
+    this.emit('check_added', config);
+  }
+
+  // Add system health check / 添加系统健康检查
+  addSystemCheck(config: SystemHealthCheckConfig): void {
+    this.systemChecks.set(config.id, { ...config });
     
-    console.log('HealthMonitor initialized');
+    // Initialize history / 初始化历史记录
+    this.history.set(config.id, []);
+
+    console.log(`Health monitor: System check added ${config.name} (${config.id})`);
+    this.emit('system_check_added', config);
   }
 
-  /**
-   * 添加健康检查
-   */
-  addHealthCheck(config: HealthCheckConfig): boolean {
-    try {
-      if (this.checks.has(config.id)) {
-        console.log(`Health check ${config.id} already exists, updating...`);
-        this.removeHealthCheck(config.id);
-      }
-      
-      this.checks.set(config.id, config);
-      
-      // 初始化历史记录
-      if (!this.history.has(config.target)) {
-        this.history.set(config.target, {
-          target: config.target,
-          results: [],
-          currentStatus: ServiceStatus.UNKNOWN,
-          consecutiveSuccesses: 0,
-          consecutiveFailures: 0,
-          lastStatusChange: Date.now(),
-          uptime: 0,
-          downtime: 0
-        });
-      }
-      
-      // 如果监控器正在运行，立即启动检查
-      if (this.isRunning) {
-        this.startCheck(config);
-      }
-      
-      console.log(`Health check added: ${config.id} (${config.target})`);
-      return true;
-      
-    } catch (error) {
-      console.error('Failed to add health check:', error);
-      return false;
+  // Remove health check / 移除健康检查
+  removeCheck(checkId: string): void {
+    // Try to remove from standard checks first / 首先尝试从标准检查中移除
+    this.healthChecker.removeCheck(checkId);
+
+    // Remove from system checks / 从系统检查中移除
+    const config = this.systemChecks.get(checkId);
+    if (config) {
+      this.systemChecks.delete(checkId);
+      this.results.delete(checkId);
+      this.history.delete(checkId);
+
+      console.log(`Health monitor: System check removed ${checkId}`);
+      this.emit('system_check_removed', config);
     }
   }
 
-  /**
-   * 移除健康检查
-   */
-  removeHealthCheck(checkId: string): boolean {
-    try {
-      const config = this.checks.get(checkId);
-      if (!config) {
-        console.log(`Health check not found: ${checkId}`);
-        return false;
-      }
-      
-      // 停止检查
-      this.stopCheck(checkId);
-      
-      // 移除配置
-      this.checks.delete(checkId);
-      
-      console.log(`Health check removed: ${checkId}`);
-      return true;
-      
-    } catch (error) {
-      console.error('Failed to remove health check:', error);
-      return false;
-    }
-  }
-
-  /**
-   * 启动监控
-   */
+  // Start health monitoring / 开始健康监控
   start(): void {
     if (this.isRunning) {
-      console.log('HealthMonitor is already running');
       return;
     }
-    
+
     this.isRunning = true;
     
-    // 启动所有健康检查
-    for (const config of this.checks.values()) {
-      this.startCheck(config);
+    // Start health checker / 启动健康检查器
+    this.healthChecker.start();
+
+    // Start monitoring timer / 启动监控定时器
+    if (this.config.checkInterval > 0) {
+      this.monitorTimer = setInterval(() => {
+        this.performSystemChecks();
+      }, this.config.checkInterval);
     }
-    
-    // 启动统计更新
-    setInterval(() => {
-      this.updateStats();
-    }, 60000); // 每分钟更新一次
-    
-    console.log(`HealthMonitor started with ${this.checks.size} checks`);
-    this.emit('monitor:started');
+
+    // Start system metrics collection / 启动系统指标收集
+    if (this.config.systemMetrics.enabled) {
+      this.metricsTimer = setInterval(() => {
+        this.collectSystemMetrics();
+      }, this.config.systemMetrics.interval);
+    }
+
+    console.log('Health Monitor started');
+    this.emit('started');
   }
 
-  /**
-   * 停止监控
-   */
+  // Stop health monitoring / 停止健康监控
   stop(): void {
     if (!this.isRunning) {
-      console.log('HealthMonitor is not running');
       return;
     }
-    
+
     this.isRunning = false;
-    
-    // 停止所有检查
-    for (const checkId of this.checks.keys()) {
-      this.stopCheck(checkId);
+
+    // Stop health checker / 停止健康检查器
+    this.healthChecker.stop();
+
+    // Clear timers / 清除定时器
+    if (this.monitorTimer) {
+      clearInterval(this.monitorTimer);
+      this.monitorTimer = undefined;
     }
-    
-    console.log('HealthMonitor stopped');
-    this.emit('monitor:stopped');
+
+    if (this.metricsTimer) {
+      clearInterval(this.metricsTimer);
+      this.metricsTimer = undefined;
+    }
+
+    console.log('Health Monitor stopped');
+    this.emit('stopped');
   }
 
-  /**
-   * 启动单个检查
-   */
-  private startCheck(config: HealthCheckConfig): void {
-    // 停止现有检查
-    this.stopCheck(config.id);
-    
-    // 立即执行一次检查
-    this.performCheck(config);
-    
-    // 设置定期检查
-    const interval = setInterval(() => {
-      this.performCheck(config);
-    }, config.interval);
-    
-    this.intervals.set(config.id, interval);
-    
-    console.log(`Health check started: ${config.id} (interval: ${config.interval}ms)`);
-  }
+  // Perform system health checks / 执行系统健康检查
+  private async performSystemChecks(): Promise<void> {
+    const systemChecks = Array.from(this.systemChecks.values()).filter(
+      check => check.enabled
+    );
 
-  /**
-   * 停止单个检查
-   */
-  private stopCheck(checkId: string): void {
-    const interval = this.intervals.get(checkId);
-    if (interval) {
-      clearInterval(interval);
-      this.intervals.delete(checkId);
-      console.log(`Health check stopped: ${checkId}`);
+    for (const check of systemChecks) {
+      try {
+        const result = await this.performSystemCheck(check);
+        this.handleSystemCheckResult(result);
+      } catch (error) {
+        console.error(`System check failed for ${check.id}:`, error);
+      }
     }
   }
 
-  /**
-   * 执行健康检查
-   */
-  private async performCheck(config: HealthCheckConfig): Promise<void> {
+  // Perform individual system check / 执行单个系统检查
+  private async performSystemCheck(config: SystemHealthCheckConfig): Promise<SystemHealthCheckResult> {
     const startTime = Date.now();
-    let result: HealthCheckResult;
     
     try {
-      const success = await this.executeCheck(config);
-      const responseTime = Date.now() - startTime;
-      
-      result = {
-        checkId: config.id,
-        target: config.target,
-        success,
-        responseTime,
-        timestamp: startTime,
-        error: success ? undefined : 'Check failed'
+      let value: number;
+      let status: HealthStatus;
+      let details: Record<string, any> = {};
+
+      switch (config.type) {
+        case SystemHealthCheckType.MEMORY:
+          value = await this.checkMemoryUsage();
+          details = { memoryUsage: value };
+          break;
+        case SystemHealthCheckType.CPU:
+          value = await this.checkCpuUsage();
+          details = { cpuUsage: value };
+          break;
+        case SystemHealthCheckType.DISK:
+          value = await this.checkDiskUsage(config.target);
+          details = { diskUsage: value, path: config.target };
+          break;
+        default:
+          throw new Error(`Unsupported system check type: ${config.type}`);
+      }
+
+      // Determine status based on thresholds / 根据阈值确定状态
+      if (config.thresholds) {
+        if (value >= config.thresholds.critical) {
+          status = HealthStatus.UNHEALTHY;
+        } else if (value >= config.thresholds.warning) {
+          status = HealthStatus.WARNING;
+        } else {
+          status = HealthStatus.HEALTHY;
+        }
+      } else {
+        status = HealthStatus.HEALTHY;
+      }
+
+      return {
+        id: config.id,
+        name: config.name,
+        status,
+        value,
+        responseTime: Date.now() - startTime,
+        timestamp: Date.now(),
+        details
       };
-      
+
     } catch (error) {
-      const responseTime = Date.now() - startTime;
-      
-      result = {
-        checkId: config.id,
-        target: config.target,
-        success: false,
-        responseTime,
-        timestamp: startTime,
+      return {
+        id: config.id,
+        name: config.name,
+        status: HealthStatus.UNHEALTHY,
+        responseTime: Date.now() - startTime,
+        timestamp: Date.now(),
         error: error instanceof Error ? error.message : String(error)
       };
     }
-    
-    // 处理检查结果
-    this.processCheckResult(config, result);
   }
 
-  /**
-   * 执行具体的健康检查
-   */
-  private async executeCheck(config: HealthCheckConfig): Promise<boolean> {
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error('Health check timeout'));
-      }, config.timeout);
+  // Check memory usage percentage / 检查内存使用百分比
+  private async checkMemoryUsage(): Promise<number> {
+    const memUsage = process.memoryUsage();
+    const totalMem = memUsage.heapTotal;
+    const usedMem = memUsage.heapUsed;
+    return (usedMem / totalMem) * 100;
+  }
+
+  // Check CPU usage percentage / 检查CPU使用百分比
+  private async checkCpuUsage(): Promise<number> {
+    return new Promise((resolve) => {
+      const startUsage = process.cpuUsage();
+      setTimeout(() => {
+        const endUsage = process.cpuUsage(startUsage);
+        const totalUsage = (endUsage.user + endUsage.system) / 1000;
+        const cpuPercent = Math.min(100, (totalUsage / 100) * 100);
+        resolve(cpuPercent);
+      }, 100);
+    });
+  }
+
+  // Check disk usage percentage / 检查磁盘使用百分比
+  private async checkDiskUsage(path: string): Promise<number> {
+    // Simplified disk usage check / 简化的磁盘使用检查
+    // In a real implementation, you would use fs.statSync or similar / 在实际实现中，您会使用fs.statSync或类似方法
+    return Math.random() * 100; // Mock implementation / 模拟实现
+  }
+
+  // Collect system metrics / 收集系统指标
+  private async collectSystemMetrics(): Promise<void> {
+    try {
+      const memUsage = process.memoryUsage();
+      const cpuUsage = process.cpuUsage();
       
-      const cleanup = () => clearTimeout(timeout);
-      
-      try {
-        switch (config.type) {
-          case HealthCheckType.HTTP:
-            this.performHttpCheck(config)
-              .then(result => {
-                cleanup();
-                resolve(result);
-              })
-              .catch(error => {
-                cleanup();
-                reject(error);
-              });
-            break;
-            
-          case HealthCheckType.TCP:
-            this.performTcpCheck(config)
-              .then(result => {
-                cleanup();
-                resolve(result);
-              })
-              .catch(error => {
-                cleanup();
-                reject(error);
-              });
-            break;
-            
-          case HealthCheckType.CUSTOM:
-            if (config.customCheck) {
-              config.customCheck(config.target)
-                .then(result => {
-                  cleanup();
-                  resolve(result);
-                })
-                .catch(error => {
-                  cleanup();
-                  reject(error);
-                });
-            } else {
-              cleanup();
-              reject(new Error('Custom check function not provided'));
-            }
-            break;
-            
-          default:
-            cleanup();
-            reject(new Error(`Unsupported check type: ${config.type}`));
+      this.systemMetrics = {
+        memory: {
+          used: memUsage.heapUsed,
+          total: memUsage.heapTotal,
+          percentage: (memUsage.heapUsed / memUsage.heapTotal) * 100,
+          available: memUsage.heapTotal - memUsage.heapUsed
+        },
+        cpu: {
+          usage: await this.checkCpuUsage(),
+          loadAverage: [0, 0, 0], // Would use os.loadavg() in real implementation / 在实际实现中会使用os.loadavg()
+          cores: 1 // Would use os.cpus().length in real implementation / 在实际实现中会使用os.cpus().length
+        },
+        disk: {
+          used: 0,
+          total: 0,
+          percentage: 0,
+          available: 0
+        },
+        network: {
+          bytesIn: 0,
+          bytesOut: 0,
+          packetsIn: 0,
+          packetsOut: 0
+        },
+        process: {
+          pid: process.pid,
+          uptime: process.uptime(),
+          memoryUsage: memUsage,
+          cpuUsage: cpuUsage
         }
-        
-      } catch (error) {
-        cleanup();
-        reject(error);
+      };
+
+      this.emit('metrics_collected', this.systemMetrics);
+    } catch (error) {
+      console.error('Failed to collect system metrics:', error);
+    }
+  }
+
+  // Handle standard health check result / 处理标准健康检查结果
+  private handleStandardCheckResult(result: BaseHealthCheckResult): void {
+    // Convert to system result format / 转换为系统结果格式
+    const systemResult: SystemHealthCheckResult = {
+      id: result.id,
+      name: result.name,
+      status: result.status,
+      responseTime: result.responseTime,
+      timestamp: result.timestamp,
+      error: result.error
+    };
+
+    this.handleSystemCheckResult(systemResult);
+  }
+
+  // Handle system health check result / 处理系统健康检查结果
+  private handleSystemCheckResult(result: SystemHealthCheckResult): void {
+    // Store result / 存储结果
+    this.results.set(result.id, result);
+
+    // Add to history / 添加到历史记录
+    const history = this.history.get(result.id) || [];
+    history.push({
+      timestamp: result.timestamp,
+      status: result.status,
+      value: result.value,
+      responseTime: result.responseTime,
+      error: result.error
+    });
+
+    // Limit history size / 限制历史记录大小
+    if (history.length > this.config.historyRetention) {
+      history.splice(0, history.length - this.config.historyRetention);
+    }
+    this.history.set(result.id, history);
+
+    // Update statistics / 更新统计
+    this.updateStats(result);
+
+    // Emit events / 发出事件
+    this.emit('check_result', result);
+
+    // Check for alerts / 检查警报
+    this.checkAlerts(result);
+  }
+
+  // Handle status change / 处理状态变化
+  private handleStatusChange(event: any): void {
+    console.log(`Health status changed: ${event.id} -> ${event.currentStatus}`);
+    this.emit('status_changed', event);
+  }
+
+  // Update statistics / 更新统计
+  private updateStats(result: SystemHealthCheckResult): void {
+    this.stats.totalChecks++;
+    this.stats.lastCheckTime = result.timestamp;
+
+    // Update status counts / 更新状态计数
+    this.stats.activeChecks = this.systemChecks.size;
+    this.stats.healthyChecks = 0;
+    this.stats.warningChecks = 0;
+    this.stats.criticalChecks = 0;
+
+    for (const res of Array.from(this.results.values())) {
+      switch (res.status) {
+        case HealthStatus.HEALTHY:
+          this.stats.healthyChecks++;
+          break;
+        case HealthStatus.WARNING:
+          this.stats.warningChecks++;
+          break;
+        case HealthStatus.UNHEALTHY:
+          this.stats.criticalChecks++;
+          break;
       }
-    });
+    }
+
+    // Update average response time / 更新平均响应时间
+    this.stats.averageResponseTime = 
+      ((this.stats.averageResponseTime * (this.stats.totalChecks - 1)) + result.responseTime) / this.stats.totalChecks;
+
+    // Calculate uptime / 计算正常运行时间
+    this.stats.uptime = this.stats.totalChecks > 0 ? 
+      (this.stats.healthyChecks / this.results.size) * 100 : 0;
   }
 
-  /**
-   * 执行HTTP健康检查
-   */
-  private async performHttpCheck(config: HealthCheckConfig): Promise<boolean> {
-    // 模拟HTTP检查
-    return new Promise((resolve) => {
-      setTimeout(() => {
-        // 90% 成功率
-        const success = Math.random() > 0.1;
-        resolve(success);
-      }, Math.random() * 100 + 50); // 50-150ms 响应时间
-    });
-  }
-
-  /**
-   * 执行TCP健康检查
-   */
-  private async performTcpCheck(config: HealthCheckConfig): Promise<boolean> {
-    // 模拟TCP检查
-    return new Promise((resolve) => {
-      setTimeout(() => {
-        // 95% 成功率
-        const success = Math.random() > 0.05;
-        resolve(success);
-      }, Math.random() * 50 + 25); // 25-75ms 响应时间
-    });
-  }
-
-  /**
-   * 处理检查结果
-   */
-  private processCheckResult(config: HealthCheckConfig, result: HealthCheckResult): void {
-    const history = this.history.get(config.target);
-    if (!history) {
-      console.error(`No history found for target: ${config.target}`);
+  // Check for alerts / 检查警报
+  private checkAlerts(result: SystemHealthCheckResult): void {
+    if (!this.config.notifications.enabled) {
       return;
     }
-    
-    // 添加结果到历史
-    history.results.push(result);
-    
-    // 限制历史大小
-    if (history.results.length > this.maxHistorySize) {
-      history.results.shift();
-    }
-    
-    // 更新连续成功/失败计数
-    if (result.success) {
-      history.consecutiveSuccesses++;
-      history.consecutiveFailures = 0;
-    } else {
-      history.consecutiveFailures++;
-      history.consecutiveSuccesses = 0;
-    }
-    
-    // 确定新状态
-    const previousStatus = history.currentStatus;
-    let newStatus = previousStatus;
-    
-    if (history.consecutiveSuccesses >= config.successThreshold) {
-      newStatus = ServiceStatus.HEALTHY;
-    } else if (history.consecutiveFailures >= config.failureThreshold) {
-      newStatus = ServiceStatus.UNHEALTHY;
-    }
-    
-    // 状态变化处理
-    if (newStatus !== previousStatus) {
-      history.currentStatus = newStatus;
-      history.lastStatusChange = Date.now();
-      
-      console.log(`Health status changed: ${config.target} ${previousStatus} -> ${newStatus}`);
-      
-      this.emit('health:status_changed', {
-        target: config.target,
-        checkId: config.id,
-        previousStatus,
-        currentStatus: newStatus,
-        result
+
+    const history = this.history.get(result.id) || [];
+    const recentFailures = history
+      .slice(-this.config.alertThresholds.consecutiveFailures)
+      .filter(h => h.status !== HealthStatus.HEALTHY);
+
+    // Check for consecutive failures / 检查连续失败
+    if (recentFailures.length >= this.config.alertThresholds.consecutiveFailures) {
+      this.sendAlert({
+        type: 'consecutive_failures',
+        checkId: result.id,
+        checkName: result.name,
+        failures: recentFailures.length,
+        threshold: this.config.alertThresholds.consecutiveFailures
       });
     }
-    
-    // 更新正常运行时间统计
-    this.updateUptimeStats(history, result);
-    
-    // 触发检查完成事件
-    this.emit('health:check_completed', {
-      target: config.target,
-      checkId: config.id,
-      result,
-      status: history.currentStatus
-    });
-    
-    // 更新全局统计
-    this.stats.totalChecks++;
-    if (result.success) {
-      this.stats.successfulChecks++;
-    } else {
-      this.stats.failedChecks++;
+
+    // Check for high response time / 检查高响应时间
+    if (result.responseTime > this.config.alertThresholds.responseTimeThreshold) {
+      this.sendAlert({
+        type: 'high_response_time',
+        checkId: result.id,
+        checkName: result.name,
+        responseTime: result.responseTime,
+        threshold: this.config.alertThresholds.responseTimeThreshold
+      });
     }
   }
 
-  /**
-   * 更新正常运行时间统计
-   */
-  private updateUptimeStats(history: HealthHistory, result: HealthCheckResult): void {
-    const now = Date.now();
-    const timeSinceLastChange = now - history.lastStatusChange;
-    
-    if (history.currentStatus === ServiceStatus.HEALTHY) {
-      history.uptime += timeSinceLastChange;
-    } else if (history.currentStatus === ServiceStatus.UNHEALTHY) {
-      history.downtime += timeSinceLastChange;
-    }
-  }
-
-  /**
-   * 获取目标健康状态
-   */
-  getHealthStatus(target: string): ServiceStatus {
-    const history = this.history.get(target);
-    return history ? history.currentStatus : ServiceStatus.UNKNOWN;
-  }
-
-  /**
-   * 获取目标健康历史
-   */
-  getHealthHistory(target: string): HealthHistory | null {
-    return this.history.get(target) || null;
-  }
-
-  /**
-   * 获取所有健康状态
-   */
-  getAllHealthStatus(): Map<string, ServiceStatus> {
-    const statusMap = new Map<string, ServiceStatus>();
-    
-    for (const [target, history] of this.history) {
-      statusMap.set(target, history.currentStatus);
-    }
-    
-    return statusMap;
-  }
-
-  /**
-   * 获取健康的目标列表
-   */
-  getHealthyTargets(): string[] {
-    const healthyTargets: string[] = [];
-    
-    for (const [target, history] of this.history) {
-      if (history.currentStatus === ServiceStatus.HEALTHY) {
-        healthyTargets.push(target);
-      }
-    }
-    
-    return healthyTargets;
-  }
-
-  /**
-   * 获取不健康的目标列表
-   */
-  getUnhealthyTargets(): string[] {
-    const unhealthyTargets: string[] = [];
-    
-    for (const [target, history] of this.history) {
-      if (history.currentStatus === ServiceStatus.UNHEALTHY) {
-        unhealthyTargets.push(target);
-      }
-    }
-    
-    return unhealthyTargets;
-  }
-
-  /**
-   * 手动触发检查
-   */
-  async triggerCheck(checkId: string): Promise<HealthCheckResult | null> {
-    const config = this.checks.get(checkId);
-    if (!config) {
-      console.log(`Health check not found: ${checkId}`);
-      return null;
-    }
-    
-    const startTime = Date.now();
-    
+  // Send alert notification / 发送警报通知
+  private async sendAlert(alert: any): Promise<void> {
     try {
-      const success = await this.executeCheck(config);
-      const responseTime = Date.now() - startTime;
-      
-      const result: HealthCheckResult = {
-        checkId: config.id,
-        target: config.target,
-        success,
-        responseTime,
-        timestamp: startTime
-      };
-      
-      this.processCheckResult(config, result);
-      return result;
-      
-    } catch (error) {
-      const responseTime = Date.now() - startTime;
-      
-      const result: HealthCheckResult = {
-        checkId: config.id,
-        target: config.target,
-        success: false,
-        responseTime,
-        timestamp: startTime,
-        error: error instanceof Error ? error.message : String(error)
-      };
-      
-      this.processCheckResult(config, result);
-      return result;
-    }
-  }
+      console.log('Alert triggered:', alert);
+      this.emit('alert', alert);
 
-  /**
-   * 更新统计信息
-   */
-  private updateStats(): void {
-    this.stats.activeChecks = this.checks.size;
-    
-    // 计算平均响应时间
-    let totalResponseTime = 0;
-    let totalResults = 0;
-    
-    for (const history of this.history.values()) {
-      for (const result of history.results) {
-        totalResponseTime += result.responseTime;
-        totalResults++;
+      // Send webhook notification if configured / 如果配置了webhook则发送通知
+      if (this.config.notifications.webhookUrl) {
+        await this.sendWebhookAlert(alert);
       }
+
+      // Send email notification if configured / 如果配置了邮件则发送通知
+      if (this.config.notifications.emailRecipients?.length) {
+        await this.sendEmailAlert(alert);
+      }
+    } catch (error) {
+      console.error('Failed to send alert:', error);
     }
-    
-    this.stats.averageResponseTime = totalResults > 0 ? totalResponseTime / totalResults : 0;
-    
-    // 计算正常运行时间百分比
-    let totalUptime = 0;
-    let totalTime = 0;
-    
-    for (const history of this.history.values()) {
-      totalUptime += history.uptime;
-      totalTime += history.uptime + history.downtime;
-    }
-    
-    this.stats.uptimePercentage = totalTime > 0 ? (totalUptime / totalTime) * 100 : 0;
-    
-    // 计算每分钟检查次数
-    const now = Date.now();
-    const oneMinuteAgo = now - 60000;
-    let checksInLastMinute = 0;
-    
-    for (const history of this.history.values()) {
-      checksInLastMinute += history.results.filter(
-        result => result.timestamp > oneMinuteAgo
-      ).length;
-    }
-    
-    this.stats.checksPerMinute = checksInLastMinute;
   }
 
-  /**
-   * 获取统计信息
-   */
+  // Send webhook alert / 发送webhook警报
+  private async sendWebhookAlert(alert: any): Promise<void> {
+    if (!this.config.notifications.webhookUrl) return;
+
+    try {
+      const response = await fetch(this.config.notifications.webhookUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          timestamp: new Date().toISOString(),
+          alert,
+          source: 'TitanChain Health Monitor'
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Webhook request failed: ${response.status}`);
+      }
+    } catch (error) {
+      console.error('Webhook alert failed:', error);
+    }
+  }
+
+  // Send email alert / 发送邮件警报
+  private async sendEmailAlert(alert: any): Promise<void> {
+    // Email implementation would go here / 邮件实现将在这里
+    console.log('Email alert would be sent to:', this.config.notifications.emailRecipients);
+  }
+
+  // Get health check result / 获取健康检查结果
+  getResult(checkId: string): SystemHealthCheckResult | undefined {
+    return this.results.get(checkId);
+  }
+
+  // Get all health check results / 获取所有健康检查结果
+  getAllResults(): Map<string, SystemHealthCheckResult> {
+    return new Map(this.results);
+  }
+
+  // Get health check history / 获取健康检查历史
+  getHistory(checkId: string): HealthHistory[] {
+    return this.history.get(checkId) || [];
+  }
+
+  // Get statistics / 获取统计
   getStats(): HealthMonitorStats {
-    this.updateStats();
     return { ...this.stats };
   }
 
-  /**
-   * 获取检查配置列表
-   */
-  getCheckConfigs(): HealthCheckConfig[] {
-    return Array.from(this.checks.values());
+  // Get system metrics / 获取系统指标
+  getSystemMetrics(): SystemMetrics | undefined {
+    return this.systemMetrics ? { ...this.systemMetrics } : undefined;
   }
 
-  /**
-   * 清理资源
-   */
-  async cleanup(): Promise<void> {
-    this.stop();
+  // Get overall health status / 获取整体健康状态
+  getOverallStatus(): HealthStatus {
+    if (this.results.size === 0) {
+      return HealthStatus.UNKNOWN;
+    }
+
+    let hasUnhealthy = false;
+    let hasWarning = false;
+
+    for (const result of Array.from(this.results.values())) {
+      if (result.status === HealthStatus.UNHEALTHY) {
+        hasUnhealthy = true;
+      } else if (result.status === HealthStatus.WARNING) {
+        hasWarning = true;
+      }
+    }
+
+    if (hasUnhealthy) {
+      return HealthStatus.UNHEALTHY;
+    } else if (hasWarning) {
+      return HealthStatus.WARNING;
+    } else {
+      return HealthStatus.HEALTHY;
+    }
+  }
+
+  // Get health summary / 获取健康摘要
+  getSummary(): any {
+    return {
+      overallStatus: this.getOverallStatus(),
+      stats: this.getStats(),
+      systemMetrics: this.getSystemMetrics(),
+      checks: Array.from(this.results.values()),
+      timestamp: Date.now()
+    };
+  }
+
+  // Update configuration / 更新配置
+  updateConfig(newConfig: Partial<HealthMonitorConfig>): void {
+    this.config = { ...this.config, ...newConfig };
     
-    this.checks.clear();
-    this.history.clear();
-    this.removeAllListeners();
-    
-    console.log('HealthMonitor cleaned up');
+    console.log('Health Monitor configuration updated');
+    this.emit('config_updated', this.config);
+  }
+
+  // Check if monitor is running / 检查监控器是否正在运行
+  isActive(): boolean {
+    return this.isRunning;
   }
 }

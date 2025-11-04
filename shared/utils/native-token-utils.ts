@@ -95,16 +95,11 @@ export function getNativeTokenInfo(address: string) {
 
 /**
  * 检查交易是否应该享受0-gas费
- * 原生代币交易和链下撮合交易享受0-gas费
+ * 原生代币交易享受0-gas费
  */
 export function shouldBeZeroGasTransaction(tx: Transaction): boolean {
   // 1. 已经标记为0-gas费的交易
   if (tx.isZeroGas) {
-    return true;
-  }
-  
-  // 2. 链下撮合交易享受0-gas费
-  if (tx.exchangeBatch && tx.exchangeBatch.batchId) {
     return true;
   }
   
