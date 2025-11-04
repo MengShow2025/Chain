@@ -409,6 +409,18 @@ export class BlockValidator {
   /**
    * 验证时间戳
    */
+  // 获取当前区块时间（毫秒），支持环境变量覆盖 // 英文 /中文
+  private getBlockTimeMs(): number {
+    const envMs = Number(process.env.BLOCK_TIME_MS);
+    if (!isNaN(envMs) && envMs > 0) {
+      return envMs;
+    }
+    return CONSENSUS_CONFIG.BLOCK_TIME * 1000;
+  }
+
+  /**
+   * 验证时间戳
+   */
   private validateTimestamp(block: Block, parentBlock?: Block): boolean {
     const now = Date.now();
     const maxFutureTime = 15 * 1000; // 允许15秒的未来时间
@@ -430,7 +442,7 @@ export class BlockValidator {
     
     // 区块间隔不能太短
     if (parentBlock) {
-      const minInterval = CONSENSUS_CONFIG.BLOCK_TIME * 1000 * 0.5; // 最小间隔为目标时间的50%
+      const minInterval = this.getBlockTimeMs() * 0.5; // 最小间隔为目标时间的50% // 英文 /中文
       if (block.timestamp - parentBlock.timestamp < minInterval) {
         return false;
       }
@@ -438,7 +450,7 @@ export class BlockValidator {
     
     return true;
   }
-  
+
   /**
    * 验证区块大小
    */
@@ -631,7 +643,7 @@ export class BlockValidator {
     // 4. 检查出块时间间隔
     if (parentBlock) {
       const timeDiff = blockTime - parentBlock.timestamp;
-      const expectedBlockTime = CONSENSUS_CONFIG.BLOCK_TIME * 1000; // 转换为毫秒
+      const expectedBlockTime = this.getBlockTimeMs(); // 使用环境变量覆盖的出块时间 // 英文 /中文
       
       // 出块时间不能太快（至少1秒）
       if (timeDiff < 1000) {

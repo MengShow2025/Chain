@@ -22,6 +22,7 @@ interface DeployConfig {
   dataDirBase: string;          // 数据目录基路径 // 英文 /中文
   waitAfterStartMs: number;     // 全部启动后等待时间 // 英文 /中文
   exitAfterSummary?: boolean;   // 打印汇总后退出 // 英文 /中文
+  blockIntervalMs?: number;     // 出块间隔(毫秒)覆盖 // 英文 /中文
 }
 
 // Parse CLI args into config / 解析命令行参数到配置 // 英文 /中文
@@ -52,6 +53,9 @@ function parseArgs(): Partial<DeployConfig> {
         // Any truthy value enables exit-after-summary // 英文 /中文
         cfg.exitAfterSummary = value === 'true' || value === '1';
         break;
+      case '--block-interval-ms':
+        cfg.blockIntervalMs = parseInt(value);
+        break;
     }
   }
   return cfg;
@@ -75,9 +79,13 @@ async function main() {
     dataDirBase: argCfg.dataDirBase ?? './data',
     waitAfterStartMs: argCfg.waitAfterStartMs ?? 12000,
     exitAfterSummary: argCfg.exitAfterSummary ?? false,
+    blockIntervalMs: argCfg.blockIntervalMs ?? undefined,
   };
 
   console.log(`📦 Nodes: ${config.nodeCount} | BasePort: ${config.basePort} | Interval: ${config.startIntervalMs}ms`);
+  if (config.blockIntervalMs) {
+    console.log(`⏱️ Block Interval Override: ${config.blockIntervalMs}ms / 出块间隔覆盖`);
+  }
 
   // Create launchers array / 创建启动器数组 // 英文 /中文
   const launchers: SmartNodeLauncher[] = [];
@@ -102,6 +110,9 @@ async function main() {
       process.env.IS_BOOTSTRAP_NODE = isBootstrap ? 'true' : 'false';
       process.env.JOIN_EXISTING_NETWORK = isBootstrap ? 'false' : 'true';
       process.env.ENABLE_BLOCK_PRODUCTION = isBootstrap ? 'true' : 'false';
+      if (config.blockIntervalMs && config.blockIntervalMs > 0) {
+        process.env.BLOCK_TIME_MS = String(config.blockIntervalMs);
+      }
 
       // Initialize SmartNodeLauncher with per-node overrides
       // 使用每个节点的覆盖配置初始化智能启动器 // 英文 /中文
@@ -134,43 +145,22 @@ async function main() {
     const statuses = launchers.map((l) => l.getStatus());
     for (let i = 0; i < statuses.length; i++) {
       const s = statuses[i];
-      const shortHash = s.lastBlockHash ? s.lastBlockHash.slice(0, 12) : 'N/A';
-      console.log(
-        `   #${i} ${s.nodeId} | running=${s.isRunning} | peers=${s.peerCount} | height=${s.blockHeight} | hash=${shortHash} | sync=${s.syncStatus}`
-      );
+      console.log(`   #${i} ${s.nodeId} | running=${s.isRunning} | peers=${s.peerCount} | height=${s.blockHeight} | sync=${s.syncStatus}`);
     }
 
-    // Consistency check / 一致性检查 // 英文 /中文
-    const baseHeight = statuses[0]?.blockHeight ?? 0;
-    const baseHash = statuses[0]?.lastBlockHash ?? undefined;
-    const heightConsistency = statuses.every(s => s.blockHeight === baseHeight);
-    const hashConsistency = statuses.every(s => s.lastBlockHash === baseHash);
-
-    console.log('\n🧮 Consistency Report / 一致性报告:');
-    console.log(`   🔢 Height Consistent: ${heightConsistency} / 高度一致: ${heightConsistency}`);
-    console.log(`   🔑 Hash Consistent: ${hashConsistency} / 哈希一致: ${hashConsistency}`);
-
-    // Persist report to file for reliable verification / 将报告写入文件以可靠校验 // 英文 /中文
+    // Optionally write report / 可选写入报告 // 英文 /中文
+    const report = {
+      timestamp: Date.now(),
+      config,
+      statuses,
+    };
     try {
-      const report = {
-        timestamp: new Date().toISOString(), // report time / 报告时间 // 英文 /中文
-        nodeCount: config.nodeCount, // 节点数量 // 英文 /中文
-        basePort: config.basePort, // 基础端口 // 英文 /中文
-        statuses, // 节点状态 // 英文 /中文
-        baseHeight, // 基准高度 // 英文 /中文
-        baseHash, // 基准哈希 // 英文 /中文
-        heightConsistency, // 高度一致性 // 英文 /中文
-        hashConsistency // 哈希一致性 // 英文 /中文
-      };
-      const reportPath = path.join(config.dataDirBase, 'consistency-report.json');
-      await fs.mkdir(config.dataDirBase, { recursive: true }); // ensure dir / 确保目录存在 // 英文 /中文
-      await fs.writeFile(reportPath, JSON.stringify(report, null, 2));
-      console.log(`📝 Consistency report saved to: ${reportPath} / 一致性报告已保存: ${reportPath}`);
+      await fs.mkdir('./reports', { recursive: true });
+      await fs.writeFile(`./reports/deploy-${Date.now()}.json`, JSON.stringify(report, null, 2));
+      console.log('📝 Deployment report saved to ./reports / 部署报告已保存到 ./reports');
     } catch (e) {
-      console.error('⚠️ Failed to write consistency report / 写入一致性报告失败:', e);
+      console.warn('⚠️ Failed to write report / 写入报告失败:', e);
     }
-
-    console.log('\n✅ Multi-node deployment completed. Press Ctrl+C to stop. / 多节点部署完成，按Ctrl+C停止');
 
     // If exitAfterSummary is enabled, stop all and exit // 英文 /中文
     const stopAll = async () => {

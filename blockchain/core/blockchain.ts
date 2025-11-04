@@ -62,6 +62,15 @@ export class TitanChain {
     console.log('TitanChain initialized successfully');
   }
   
+  // 获取当前区块时间（毫秒），支持环境变量覆盖 // 英文 /中文
+  private getBlockTimeMs(): number {
+    const envMs = Number(process.env.BLOCK_TIME_MS);
+    if (!isNaN(envMs) && envMs > 0) {
+      return envMs;
+    }
+    return CONSENSUS_CONFIG.BLOCK_TIME * 1000;
+  }
+  
   /**
    * 启动区块链网络
    */
@@ -98,6 +107,9 @@ export class TitanChain {
       if (hasGenesis) {
         this.startValidatorElection();
       }
+      
+      // 更新网络统计的平均区块时间以匹配当前配置 // 英文 /中文
+      this.networkStats.averageBlockTime = this.getBlockTimeMs();
       
       this.isRunning = true;
       console.log('TitanChain network started successfully');
@@ -173,7 +185,7 @@ export class TitanChain {
    * 启动区块生产
    */
   private startBlockProduction(): void {
-    const blockTime = CONSENSUS_CONFIG.BLOCK_TIME * 1000;
+    const blockTime = this.getBlockTimeMs();
     
     this.blockProductionInterval = setInterval(async () => {
       if (!this.isRunning) return;
@@ -185,7 +197,7 @@ export class TitanChain {
       }
     }, blockTime);
     
-    console.log(`Block production started with ${CONSENSUS_CONFIG.BLOCK_TIME}s interval`);
+    console.log(`Block production started with ${blockTime}ms interval`);
   }
 
   /**
@@ -363,7 +375,7 @@ export class TitanChain {
       return null;
     }
   }
-  
+
   /**
    * 提交交易
    */

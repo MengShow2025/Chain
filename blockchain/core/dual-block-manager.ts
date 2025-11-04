@@ -332,19 +332,23 @@ export class DualBlockManager {
    */
   private async produceBlock(blockType: BlockType, transactions: Transaction[]): Promise<Block | null> {
     try {
-      // 获取区块配置 / Get block configuration
+      // 获取区块配置 / Get block configuration // 英文 /中文
       const config = blockType === BlockType.FAST 
         ? DUAL_BLOCK_CONFIG.FAST_BLOCK 
         : DUAL_BLOCK_CONFIG.BATCH_BLOCK;
 
-      // 选择区块生产者 / Select block producer
-      const producer = await this.consensusEngine.selectBlockProducer(Date.now());
+      // 在选择出块者前先计算下一个区块号与父哈希 / Compute next block number and parent hash before selecting producer // 英文 /中文
+      const blockNumber = await this.getNextBlockNumber();
+      const parentHash = await this.getLatestBlockHash();
+
+      // 选择区块生产者（使用真实区块号而非时间戳） / Select block producer using real block number, not timestamp // 英文 /中文
+      const producer = await this.consensusEngine.selectBlockProducer(blockNumber);
       if (!producer) {
-        console.error('❌ 无法选择区块生产者 / Cannot select block producer');
+        console.error('❌ 无法选择区块生产者 / Cannot select block producer'); // 英文 /中文
         return null;
       }
 
-      // 执行交易 / Execute transactions
+      // 执行交易 / Execute transactions // 英文 /中文
       const executionResults = [];
       let totalGasUsed = BigInt(0);
 
@@ -353,24 +357,21 @@ export class DualBlockManager {
         executionResults.push(result);
         totalGasUsed += result.gasUsed;
 
-        // 检查Gas限制 / Check gas limit
+        // 检查Gas限制 / Check gas limit // 英文 /中文
         if (totalGasUsed > config.GAS_LIMIT) {
-          console.log(`⚠️ 达到${blockType}区块Gas限制，停止添加交易 / Reached ${blockType} block gas limit, stopping transaction addition`);
+          console.log(`⚠️ 达到${blockType}区块Gas限制，停止添加交易 / Reached ${blockType} block gas limit, stopping transaction addition`); // 英文 /中文
           break;
         }
       }
 
-      // 创建区块 / Create block
-      const blockNumber = await this.getNextBlockNumber();
-      const parentHash = await this.getLatestBlockHash();
-
+      // 创建区块 / Create block // 英文 /中文
       const block: Block = {
         number: blockNumber,
         hash: this.calculateBlockHash(blockNumber, parentHash, producer, transactions),
         parentHash,
         timestamp: Date.now(),
         validator: producer,
-        transactions: transactions.slice(0, executionResults.length), // 只包含成功执行的交易 / Only include successfully executed transactions
+        transactions: transactions.slice(0, executionResults.length), // 只包含成功执行的交易 / Only include successfully executed transactions // 英文 /中文
         transactionsRoot: this.calculateTransactionsRoot(transactions),
         receiptsRoot: this.calculateReceiptsRoot(executionResults),
         stateRoot: this.evmExecutor.getStateRoot(),
@@ -379,26 +380,26 @@ export class DualBlockManager {
         difficulty: BigInt(1),
         size: this.calculateBlockSize(transactions),
         nonce: `0x${blockNumber.toString(16).padStart(16, '0')}`,
-        reward: BigInt(0) // 奖励计算将在共识层处理 / Reward calculation will be handled in consensus layer
+        reward: BigInt(0) // 奖励计算将在共识层处理 / Reward calculation will be handled in consensus layer // 英文 /中文
       };
 
-      // 验证区块 / Validate block
+      // 验证区块 / Validate block // 英文 /中文
       const parentBlock = await this.getParentBlock(parentHash);
       if (!await this.blockValidator.validateBlock(block, parentBlock)) {
-        console.error('❌ 区块验证失败 / Block validation failed');
+        console.error('❌ 区块验证失败 / Block validation failed'); // 英文 /中文
         return null;
       }
 
-      // 处理区块 / Process block
+      // 处理区块 / Process block // 英文 /中文
       if (!await this.consensusEngine.processNewBlock(block)) {
-        console.error('❌ 区块处理失败 / Block processing failed');
+        console.error('❌ 区块处理失败 / Block processing failed'); // 英文 /中文
         return null;
       }
 
       return block;
 
     } catch (error) {
-      console.error('❌ 区块生产过程中发生错误 / Error during block production:', error);
+      console.error('❌ 区块生产过程中发生错误 / Error during block production:', error); // 英文 /中文
       return null;
     }
   }

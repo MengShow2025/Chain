@@ -315,40 +315,43 @@ class EnhancedTitanChainNode {
    */
   private createGenesisValidators(): Validator[] {
     console.log('🏛️ Creating genesis validators / 创建创世验证节点...');
-    
-    const genesisValidators: Validator[] = [
-      {
-        address: '0x742d35Cc6634C0532925a3b8D4C2C4e0C8b83265',
-        publicKey: '0x04f8b8af0c8b8c8d8e8f8a8b8c8d8e8f8a8b8c8d8e8f8a8b8c8d8e8f8a8b8c8d8e8f8a8b8c8d8e8f8a8b8c8d8e8f8a8b8c8d8e8f8a8b8c8d8e8f',
-        stake: BigInt('1000000000000000000000'), // 1000 tokens
-        isActive: true,
-        joinedAt: Date.now(),
-        lastActiveAt: Date.now(),
-        reputation: 100,
-        slashCount: 0
-      },
-      {
-        address: '0x8ba1f109551bD432803012645Hac136c30C85bcf',
-        publicKey: '0x04a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0',
-        stake: BigInt('800000000000000000000'), // 800 tokens
-        isActive: true,
-        joinedAt: Date.now(),
-        lastActiveAt: Date.now(),
-        reputation: 95,
-        slashCount: 0
-      },
-      {
-        address: '0x1234567890123456789012345678901234567890',
-        publicKey: '0x04123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456',
-        stake: BigInt('600000000000000000000'), // 600 tokens
-        isActive: true,
-        joinedAt: Date.now(),
-        lastActiveAt: Date.now(),
-        reputation: 90,
-        slashCount: 0
-      }
-    ];
 
+    // Ensure PoS-compatible validator structure / 确保PoS兼容的验证者结构 // 英文 /中文
+    const now = Date.now(); // 英文 /中文
+    const blockTimeMs = (process.env.BLOCK_TIME_MS ? parseInt(process.env.BLOCK_TIME_MS) : CONSENSUS_CONFIG.BLOCK_TIME * 1000);
+
+    const makeValidator = (address: string, stakeWei: bigint, name: string): Validator => ({
+      address,
+      publicKey: `0x${address.slice(2).padEnd(128, '0')}`, // placeholder pubkey derived from address / 使用地址派生占位公钥 // 英文 /中文
+      stake: stakeWei,
+      delegatedStake: BigInt(0),
+      totalStake: stakeWei,
+      commission: 5,
+      status: 'active', // 必须为active以进入竞争出块 // 英文 /中文
+      performance: {
+        blocksProduced: 0,
+        blocksExpected: 0,
+        uptime: 100,
+        missedBlocks: 0,
+        slashingEvents: 0,
+        averageBlockTime: blockTimeMs,
+        score: 100
+      },
+      metadata: {
+        name,
+        description: 'Genesis validator / 创世验证者', // 英文 /中文
+        website: 'https://titanchain.io'
+      },
+      joinedAt: now,
+      lastActiveBlock: 0
+    });
+
+    // Use valid hex addresses and diverse stakes / 使用合法十六进制地址并设置不同质押量 // 英文 /中文
+    const v1 = makeValidator('0x1111111111111111111111111111111111111111', BigInt('1000000000000000000000'), 'Genesis Validator #1');
+    const v2 = makeValidator('0x2222222222222222222222222222222222222222', BigInt('800000000000000000000'), 'Genesis Validator #2');
+    const v3 = makeValidator('0x3333333333333333333333333333333333333333', BigInt('600000000000000000000'), 'Genesis Validator #3');
+
+    const genesisValidators: Validator[] = [v1, v2, v3];
     console.log(`✅ Created ${genesisValidators.length} genesis validators / 创建了${genesisValidators.length}个创世验证节点`);
     return genesisValidators;
   }

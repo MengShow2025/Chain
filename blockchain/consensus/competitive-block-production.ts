@@ -34,6 +34,12 @@ export class CompetitiveBlockProduction {
   private activeProducers: Map<string, Validator> = new Map();
   private blockProductionHistory: Map<number, BlockProductionResult> = new Map();
   private validatorWeights: Map<string, ValidatorWeight> = new Map();
+  // Track consecutive production counts per validator // 英文 /中文
+  private consecutiveProductionCount: Map<string, number> = new Map(); // 英文 /中文
+  // Remember last selected producer // 英文 /中文
+  private lastSelectedProducer: string | null = null; // 英文 /中文
+  // Track when a producer was added for cold-start boost // 英文 /中文
+  private producerAddedAt: Map<string, number> = new Map(); // 英文 /中文
 
   constructor(vrfPrivateKey?: Buffer) {
     this.vrfSelector = new VRFRandomSelector(vrfPrivateKey);
@@ -45,6 +51,11 @@ export class CompetitiveBlockProduction {
   addBlockProducer(validator: Validator): void {
     this.activeProducers.set(validator.address, validator);
     this.updateValidatorWeight(validator);
+    // Initialize tracking maps // 英文 /中文
+    this.producerAddedAt.set(validator.address, Date.now()); // 英文 /中文
+    if (!this.consecutiveProductionCount.has(validator.address)) {
+      this.consecutiveProductionCount.set(validator.address, 0); // 英文 /中文
+    }
     console.log(`Added block producer: ${validator.address}`);
   }
 
@@ -61,35 +72,33 @@ export class CompetitiveBlockProduction {
    * 更新验证节点权重
    */
   private updateValidatorWeight(validator: Validator): void {
-    // 使用固定的基础权重，确保更公平的分布
-    const baseWeight = BigInt(1000000); // 固定基础权重
-    
-    // 性能加权 (0.9-1.1倍) - 减小性能影响
-    const performanceMultiplier = validator.performance?.score 
-      ? Math.max(0.9, Math.min(1.1, validator.performance.score / 100))
-      : 1.0;
-    
-    // 在线时间加权 (0.95-1.0倍) - 减小在线时间影响
-    const uptimeMultiplier = validator.performance?.uptime
-      ? Math.max(0.95, validator.performance.uptime / 100)
-      : 1.0;
+    // 基础权重：质押量 // 英文 /中文
+    const stakeBase = validator.totalStake || validator.stake || BigInt(0); // 英文 /中文
+    const baseWeight = stakeBase;
 
-    // 增加更大的随机变化以增加选择多样性 (0.5-1.5倍)
-    const randomMultiplier = 0.5 + Math.random() * 1.0;
+    // Performance multiplier (0.6 - 1.4) using integer scaling (x1000) // 英文 /中文
+    const perfScore = validator.performance?.score ?? 100; // 英文 /中文
+    const perfMultiplierFloat = 0.6 + 0.8 * (Math.max(0, Math.min(100, perfScore)) / 100); // 英文 /中文
+    const perfScaled = Math.round(perfMultiplierFloat * 1000); // 600-1400 // 英文 /中文
 
-    // 添加基于地址和时间的伪随机因子
-    const addressHash = parseInt(validator.address.slice(-8), 16);
-    const timeHash = Date.now() % 10000;
-    const addressMultiplier = 0.7 + ((addressHash + timeHash) % 1000) / 1666; // 0.7-1.3倍
+    // Uptime multiplier (0.8 - 1.2) using integer scaling (x1000) // 英文 /中文
+    const uptimeScore = validator.performance?.uptime ?? 100; // 英文 /中文
+    const uptimeMultiplierFloat = 0.8 + 0.4 * (Math.max(0, Math.min(100, uptimeScore)) / 100); // 英文 /中文
+    const uptimeScaled = Math.round(uptimeMultiplierFloat * 1000); // 800-1200 // 英文 /中文
 
-    // 计算最终权重
-    const finalWeight = BigInt(Math.floor(
-      Number(baseWeight) * performanceMultiplier * uptimeMultiplier * randomMultiplier * addressMultiplier
-    ));
+    // 移除非确定性随机与时间相关因子，避免不可复现选择 // 英文 /中文
+
+    // Scale factor denominator (x1000 for each multiplier) // 英文 /中文
+    const SCALE = BigInt(1000);
+    const DEN = SCALE * SCALE; // 10^6 // 英文 /中文
+
+    // Compute final weight in BigInt space to avoid precision loss // 英文 /中文
+    let finalWeight = (baseWeight * BigInt(perfScaled) * BigInt(uptimeScaled)) / DEN; // 英文 /中文
+    if (finalWeight < BigInt(1)) finalWeight = BigInt(1); // 防止为0 // 英文 /中文
 
     this.validatorWeights.set(validator.address, {
       address: validator.address,
-      stake: validator.stake,
+      stake: stakeBase,
       performance: validator.performance?.score || 0,
       uptime: validator.performance?.uptime || 0,
       finalWeight
@@ -108,77 +117,104 @@ export class CompetitiveBlockProduction {
       return null;
     }
 
-    // 更新所有验证节点权重
+    // 更新所有验证节点权重 // 英文 /中文
     for (const producer of producers) {
       this.updateValidatorWeight(producer);
     }
 
-    // 计算总权重
-    const totalWeight = Array.from(this.validatorWeights.values())
-      .reduce((sum, weight) => sum + weight.finalWeight, BigInt(0));
+    // 计算有效权重（含连续出块折扣与冷启动加成） // 英文 /中文
+    const effectiveWeights = new Map<string, bigint>(); // 英文 /中文
+    const SCALE = BigInt(1000); // 英文 /中文
+    const DEN = SCALE * SCALE; // 纯选择附加的双乘因子分母 // 英文 /中文
 
-    if (totalWeight === BigInt(0)) {
-      console.error('Total validator weight is zero');
+    for (const [address, weight] of this.validatorWeights) {
+      // 连续出块抑制：指数衰减 0.85^(k-1)，最小0.4 // 英文 /中文
+      const consec = this.consecutiveProductionCount.get(address) ?? 0; // 英文 /中文
+      const decay = Math.max(0.4, Math.pow(0.85, Math.max(0, consec - 1))); // 英文 /中文
+      const consecScaled = Math.round(decay * 1000); // 英文 /中文
+
+      // 冷启动加成：加入10分钟内，线性 1.05-1.10 // 英文 /中文
+      const addedAt = this.producerAddedAt.get(address) ?? Date.now(); // 英文 /中文
+      const ageMs = Date.now() - addedAt; // 英文 /中文
+      const COLD_MS = 10 * 60 * 1000; // 英文 /中文
+      let coldScaled = 1000; // 英文 /中文
+      if (ageMs < COLD_MS) {
+        const frac = Math.max(0, (COLD_MS - ageMs) / COLD_MS); // 0-1 // 英文 /中文
+        const boost = 1.05 + frac * 0.05; // 1.05 - 1.10 // 英文 /中文
+        coldScaled = Math.round(boost * 1000); // 英文 /中文
+      }
+
+      // 计算有效权重 // 英文 /中文
+      let eff = (weight.finalWeight * BigInt(consecScaled) * BigInt(coldScaled)) / DEN; // 英文 /中文
+      if (eff < BigInt(1)) eff = BigInt(1); // 英文 /中文
+      effectiveWeights.set(address, eff); // 英文 /中文
+    }
+
+    // 计算总有效权重 // 英文 /中文
+    const totalEffectiveWeight = Array.from(effectiveWeights.values())
+      .reduce((sum, w) => sum + w, BigInt(0)); // 英文 /中文
+
+    if (totalEffectiveWeight === BigInt(0)) {
+      console.error('Total effective validator weight is zero'); // 英文 /中文
       return null;
     }
 
-    // 使用多重随机源生成随机数
-    const entropy1 = Math.random().toString(36).substring(2);
-    const entropy2 = Date.now().toString(36);
-    const entropy3 = (blockNumber * 31 + producers.length * 17).toString(36);
-    
-    // 组合多个熵源
-    const combinedEntropy = `${blockNumber}-${previousBlockHash}-${entropy1}-${entropy2}-${entropy3}`;
-    
-    // 使用crypto.createHash生成更好的随机性
-    const crypto = await import('crypto');
-    const hash = crypto.createHash('sha256');
-    hash.update(combinedEntropy);
-    const hashResult = hash.digest('hex');
-    
-    // 生成随机值进行选择 - 确保随机值在总权重范围内
-    const hashValue = BigInt('0x' + hashResult.slice(0, 16)); // 使用前16个字符
-    const randomValue = hashValue % totalWeight; // 确保随机值在总权重范围内
+    // 使用VRF生成确定性随机值（可验证） // 英文 /中文
+    const seed = `${blockNumber}-${previousBlockHash}`; // 英文 /中文
+    const vrf = await this.vrfSelector.generateVRFProof(seed); // 英文 /中文
+    const outputHex = (vrf.output || '0'.repeat(64)); // 英文 /中文
+    const hashValue = BigInt('0x' + outputHex.slice(0, 16)); // 使用前16个字符 // 英文 /中文
+    const randomValue = hashValue % totalEffectiveWeight; // 英文 /中文
 
-    // 基于权重选择出块者
+    // 基于有效权重选择出块者 // 英文 /中文
     let currentWeight = BigInt(0);
     let selectedProducer: string | null = null;
     let selectionWeight = BigInt(0);
 
-    // 调试：打印权重分布
-    console.log(`\n=== 区块 #${blockNumber} 权重分布 ===`);
-    console.log(`总权重: ${totalWeight}`);
-    console.log(`随机值: ${randomValue}`);
+    // 调试：打印权重分布（有效权重） // 英文 /中文
+    console.log(`\n=== 区块 #${blockNumber} 权重分布(有效) ===`);
+    console.log(`总有效权重: ${totalEffectiveWeight}`);
+    console.log(`随机值(VRF): ${randomValue}`);
+    console.log(`VRF Seed: ${seed}, Output: ${outputHex.slice(0, 16)}...`); // 英文 /中文
     
-    for (const [address, weight] of this.validatorWeights) {
-      console.log(`${address}: ${weight.finalWeight} (${Number(weight.finalWeight * BigInt(100) / totalWeight)}%)`);
-      currentWeight += weight.finalWeight;
+    for (const [address, effWeight] of effectiveWeights) {
+      console.log(`${address}: ${effWeight} (${Number(effWeight * BigInt(100) / totalEffectiveWeight)}%)`); // 英文 /中文
+      currentWeight += effWeight;
       if (randomValue < currentWeight && !selectedProducer) {
         selectedProducer = address;
-        selectionWeight = weight.finalWeight;
-        console.log(`✅ 选中: ${address}`);
+        selectionWeight = effWeight;
+        console.log(`✅ 选中: ${address}`); // 英文 /中文
       }
     }
 
-    // 备选方案：选择第一个生产者
+    // 备选方案：选择第一个生产者 // 英文 /中文
     if (!selectedProducer) {
       selectedProducer = producers[0].address;
-      selectionWeight = this.validatorWeights.get(selectedProducer)?.finalWeight || BigInt(0);
+      selectionWeight = effectiveWeights.get(selectedProducer) || BigInt(0);
     }
 
     const result: BlockProductionResult = {
       selectedProducer,
       blockNumber,
       timestamp: Date.now(),
-      vrfProof: hashResult, // 使用哈希结果作为证明
+      vrfProof: outputHex, // 使用VRF输出作为证明 // 英文 /中文
       competitorCount: producers.length,
       selectionWeight
     };
 
-    // 记录出块历史
+    // 记录出块历史与连续计数 // 英文 /中文
     this.blockProductionHistory.set(blockNumber, result);
+    const prev = this.lastSelectedProducer; // 英文 /中文
+    if (prev === selectedProducer) {
+      const c = (this.consecutiveProductionCount.get(selectedProducer!) || 0) + 1; // 英文 /中文
+      this.consecutiveProductionCount.set(selectedProducer!, c); // 英文 /中文
+    } else {
+      if (prev) this.consecutiveProductionCount.set(prev, 0); // 英文 /中文
+      this.consecutiveProductionCount.set(selectedProducer!, 1); // 英文 /中文
+    }
+    this.lastSelectedProducer = selectedProducer; // 英文 /中文
 
-    console.log(`Block #${blockNumber} producer selected: ${selectedProducer} (weight: ${selectionWeight})`);
+    console.log(`Block #${blockNumber} producer selected: ${selectedProducer} (effective weight: ${selectionWeight})`); // 英文 /中文
     
     return result;
   }
